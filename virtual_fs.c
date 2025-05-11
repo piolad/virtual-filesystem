@@ -42,7 +42,16 @@ void usage(){
     printf("\tmkdir <path>\t\t- create directory at path\n");
     printf("\trmdir <path>\t\t- remove directory at path\n");
     printf("\tls <path>\t\t- list items at path\n");
-    printf("\tdf <path>\t\t- show disk usage\n");
+    printf("\tdf\t\t- show disk usage of the image\n");
+    printf("\tlsdf <path>\t\t- show disk usage of the pathitem\n");
+    printf("\tcrhl <path> <path>\t\t- create a hard link to file or dir\n");
+    printf("\trm <path>\t\t- remove a file or link\n");
+    printf("\text <path> <n>\t\t- add n bytes to a file\n");
+    printf("\tred <path> <n>\t\t- reduce n bytes from a file\n");
+    printf("\tdu <path>\t\t- display info about disk usage\n");
+
+    printf("\tecpt <ext_path> <path>\t\t- external copy to disk\n");
+    printf("\tecpf <path> <ext_path>\t\t- external copy from disk\n");
 
 }
 
@@ -51,6 +60,6 @@ int main(int argc, char* argv[] ){
     if(argc < 3){usage(); return 1;}
 
 
-    // test path for the image
+    
 
 }
