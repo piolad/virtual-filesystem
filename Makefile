@@ -1,5 +1,5 @@
-CC      := cc
-CFLAGS  := -std=c17 -Wall -Wextra -O2
+CC      := gcc
+CFLAGS  := -std=c17 -Wall -Wextra -g -fsanitize=address 
 LDFLAGS :=
 TARGET  := vfs
 SRC     := virtual_fs.c
