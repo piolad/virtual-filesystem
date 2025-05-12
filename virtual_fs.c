@@ -227,11 +227,11 @@ static uint32_t path_lookup(FILE *fp,
     char *saveptr = NULL;
     char *tok = strtok_r(tmp, "/", &saveptr);
     char *next_tok = strtok_r(NULL, "/", &saveptr);
-
+    uint8_t *blk_buf = malloc(BLOCKSIZE);
     while (tok)
     {
         bool last = (next_tok == NULL);
-        uint8_t blk_buf[BLOCKSIZE];
+
         read_block(fp, cur.directPointers[0], blk_buf);
 
         DirectoryEntry child;
