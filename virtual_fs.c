@@ -34,12 +34,10 @@ typedef struct
     uint32_t blockSize;
     uint32_t dataStartOffset;
 } SuperBlock;
-} SuperBlock;
 
 typedef struct
 {
     uint32_t size; // in bytes
-    uint32_t directPointers[DIRECTBLOCK_CNT];
     uint32_t directPointers[DIRECTBLOCK_CNT];
     uint32_t linkCount;
     uint32_t isDirectory; // 0 - file, 1 -dir
