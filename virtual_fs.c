@@ -12,26 +12,85 @@
 
 #pragma pack(push, 1) // ensure structures are tightly packed
 
-struct SuperBlock {
+#define BLOCKSIZE 1024
+#define DIRECTBLOCK_CNT 12
+#define MAX_FILENAME 255
+
+#define INODE_COUNT 128
+#define INODE_SIZE 128
+#define INODE_TABLE_BLOCKS (INODE_COUNT * INODE_SIZE / BLOCKSIZE)
+
+#define SUPERBLOCK_OFFSET 0
+#define BGDT_OFFSET (SUPERBLOCK_OFFSET + BLOCKSIZE)
+#define BLOCK_BITMAP_OFFSET (BGDT_OFFSET + BLOCKSIZE)
+#define INODE_BITMAP_OFFSET (BLOCK_BITMAP_OFFSET + BLOCKSIZE)
+#define INODE_TABLE_OFFSET (INODE_BITMAP_OFFSET + BLOCKSIZE)
+#define DATA_BLOCKS_OFFSET (INODE_TABLE_OFFSET + INODE_TABLE_BLOCKS * BLOCKSIZE)
+
+
+typedef struct {
     uint32_t totalBlockCount;
     uint32_t totalInodeCount;
     uint32_t freeInodeCount;
     uint32_t freeBlockCount;
     uint32_t dataStartOffset;
-};
+} SuperBlock;
 
 // index node - what is it, when the file was created, permissions, pointer to data
-struct Inode {
+typedef struct {
     uint32_t size; // in bytes
-    uint32_t directPointers[12];
+    uint32_t directPointers[DIRECTBLOCK_CNT];
     uint32_t linkCount;
     bool isDirectory;
 
-};
-struct DirectoryEntry {
-    char name[256];
+} Inode;
+typedef struct  {
+    char name[MAX_FILENAME];
     uint32_t inodeIndex;
-};
+} DirectoryEntry;
+
+
+static void die(const char *msg)
+{
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
+
+void init_disk(const char* filename, size_t disk_size) {
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        die("file could not be opened!");
+        return;
+    }
+
+    // Fill with zeros
+    uint8_t zero = 0;
+    for (size_t i = 0; i < disk_size; i++) {
+        fwrite(&zero, 1, 1, fp);
+    }
+
+    // go back to first byte:
+    fseek(fp, 0, SEEK_SET);
+    // write superblock
+    SuperBlock sb;
+    sb.totalBlockCount = disk_size / BLOCKSIZE;
+    sb.totalInodeCount = INODE_COUNT;
+    sb.freeInodeCount = INODE_COUNT;
+    sb.freeBlockCount = sb.totalBlockCount - INODE_TABLE_BLOCKS - 1; // 1 for superblock
+    sb.dataStartOffset = DATA_BLOCKS_OFFSET;
+
+    printf("Total blocks: %u\n", sb.totalBlockCount);
+    printf("Total inodes: %u\n", sb.totalInodeCount);
+    printf("Free inodes: %u\n", sb.freeInodeCount);
+    printf("Free blocks: %u\n", sb.freeBlockCount);
+    printf("Data start offset: %u\n", sb.dataStartOffset);
+
+    fwrite(&sb, sizeof(SuperBlock), 1, fp);
+
+
+    fclose(fp);
+}
+
 
 
 
@@ -59,6 +118,9 @@ void usage(){
 int main(int argc, char* argv[] ){
     if(argc < 3){usage(); return 1;}
 
+    if(strcmp(argv[2], "mkfs") ==0){
+        init_disk(argv[1], atoi(argv[3]));
+    }
 
     
 
