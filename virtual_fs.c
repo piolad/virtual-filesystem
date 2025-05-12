@@ -15,6 +15,7 @@
 #define INODE_COUNT 128
 #define INODE_SIZE 64
 
+
 #define INODE_TABLE_BLOCKS ((INODE_COUNT * INODE_SIZE + BLOCKSIZE - 1) / BLOCKSIZE)
 
 #define BGDT_OFFSET BLOCKSIZE
@@ -228,13 +229,13 @@ static uint32_t path_lookup(FILE *fp,
     char *tok = strtok_r(tmp, "/", &saveptr);
     char *next_tok = strtok_r(NULL, "/", &saveptr);
     uint8_t *blk_buf = malloc(BLOCKSIZE);
+    DirectoryEntry child;
     while (tok)
     {
         bool last = (next_tok == NULL);
 
         read_block(fp, cur.directPointers[0], blk_buf);
 
-        DirectoryEntry child;
         int found = find_entry_in_block((DirectoryEntry *)blk_buf,
                                         tok, &child, NULL);
 
@@ -270,6 +271,7 @@ static uint32_t path_lookup(FILE *fp,
         tok = next_tok;
         next_tok = strtok_r(NULL, "/", &saveptr);
     }
+    free(blk_buf); 
 
     /* should never reach here */
     return UINT32_MAX;
@@ -354,7 +356,8 @@ static void cmd_ls(const char *img, const char *path)
     {
 
         DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
-        read_inode(fp, parent_idx, &(Inode){0});
+        Inode tmp = {0};
+        read_inode(fp, parent_idx, &tmp);
         read_block(fp, ((Inode){0}).directPointers[0], blk); 
     }
 
