@@ -492,6 +492,112 @@ static void cmd_rmdir(const char *img, const char *path)
     printf("rmdir: removed %s\n", path);
 }
 
+/* ─── Add right after the existing prototypes ──────────────────────────────── */
+static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path);
+static void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path);
+
+/* ─── Helper: copy a host file → VFS (external copy to) ────────────────────── */
+static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    /* open & size host file */
+    FILE *hf = fopen(host_path, "rb");
+    if (!hf) die("ecpt: open host file");
+
+    if (fseeko(hf, 0, SEEK_END)) die("ecpt: ftell");
+    uint64_t fsize = ftello(hf);
+    rewind(hf);
+
+    if (fsize > DIRECTBLOCK_CNT * BLOCKSIZE)
+        die("ecpt: file too large for this FS (max 12 KiB)");
+
+    /* resolve destination */
+    uint32_t parent_idx;
+    char leaf[MAX_FILENAME];
+    uint32_t found = path_lookup(fp, vfs_path, &parent_idx, leaf);
+    if (found != parent_idx)           /* already exists */
+        die("ecpt: destination already exists");
+
+    /* allocate inode + blocks */
+    uint32_t ino_idx = alloc_inode(fp);
+    if (ino_idx == UINT32_MAX) die("ecpt: no free inodes");
+
+    uint32_t need_blocks = (fsize + BLOCKSIZE - 1) / BLOCKSIZE;
+    if (need_blocks > sb.freeBlockCount)
+        die("ecpt: not enough free blocks");
+    uint32_t blk[DIRECTBLOCK_CNT] = {0};
+    for (uint32_t i = 0; i < need_blocks; ++i)
+        if ((blk[i] = alloc_block(fp)) == UINT32_MAX)
+            die("ecpt: alloc_block");
+
+    /* write payload */
+    uint8_t buf[BLOCKSIZE] = {0};
+    for (uint32_t i = 0; i < need_blocks; ++i) {
+        size_t chunk = (i == need_blocks - 1) ? (fsize - i * BLOCKSIZE)
+                                              : BLOCKSIZE;
+        memset(buf, 0, BLOCKSIZE);
+        fread(buf, 1, chunk, hf);
+        write_block(fp, blk[i], buf);
+    }
+    fclose(hf);
+
+    /* create inode */
+    Inode ino = {0};
+    ino.size       = (uint32_t)fsize;
+    ino.linkCount  = 1;
+    ino.isDirectory = 0;
+    for (uint32_t i = 0; i < need_blocks; ++i) ino.directPointers[i] = blk[i];
+    write_inode(fp, ino_idx, &ino);
+
+    /* link into parent dir */
+    Inode parent;
+    read_inode(fp, parent_idx, &parent);
+    if (add_entry_to_dir(fp, &parent, parent_idx, leaf, ino_idx) < 0)
+        die("ecpt: parent directory full");
+
+    /* bookkeeping */
+    sb.freeInodeCount--;
+    sb.freeBlockCount -= need_blocks;
+    store_super(fp);
+    fclose(fp);
+    printf("ecpt: copied \"%s\" → \"%s\"\n", host_path, vfs_path);
+}
+
+/* ─── Helper: copy VFS file → host (external copy from) ────────────────────── */
+static void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    uint32_t parent_idx;
+    char leaf[MAX_FILENAME];
+    uint32_t ino_idx = path_lookup(fp, vfs_path, &parent_idx, leaf);
+    if (ino_idx == parent_idx)
+        die("ecpf: source not found");
+
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
+    if (ino.isDirectory)
+        die("ecpf: cannot copy directories (only regular files)");
+
+    FILE *hf = fopen(host_path, "wb");
+    if (!hf) die("ecpf: create host file");
+
+    uint32_t blocks = (ino.size + BLOCKSIZE - 1) / BLOCKSIZE;
+    uint8_t buf[BLOCKSIZE];
+    for (uint32_t i = 0; i < blocks; ++i) {
+        read_block(fp, ino.directPointers[i], buf);
+        size_t chunk = (i == blocks - 1) ? (ino.size - i * BLOCKSIZE)
+                                         : BLOCKSIZE;
+        fwrite(buf, 1, chunk, hf);
+    }
+    fclose(hf);
+    fclose(fp);
+    printf("ecpf: copied \"%s\" → \"%s\"\n", vfs_path, host_path);
+}
+
 
 void init_disk(const char *filename, size_t disk_size)
 {
@@ -663,6 +769,25 @@ int main(int argc, char *argv[])
         }
         cmd_rmdir(img, argv[3]);
         return 0; 
+    }else if (strcmp(cmd, "ecpt") == 0)
+    {
+        if (argc != 5)
+        {
+            usage();
+            return 1;
+        }
+        cmd_ecpt(img, argv[3], argv[4]);
+        return 0;
+    }
+    else if (strcmp(cmd, "ecpf") == 0)
+    {
+        if (argc != 5)
+        {
+            usage();
+            return 1;
+        }
+        cmd_ecpf(img, argv[3], argv[4]);
+        return 0;
     }
 
     usage();

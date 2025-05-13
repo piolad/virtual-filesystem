@@ -2,7 +2,7 @@
 
 VFS_EXEC="./vfs"
 IMAGE="test.img"
-DISK_SIZE=$((1024 * 1024))  # 1MB
+DISK_SIZE=$((4*1024 * 1024))  # 4MB
 TEST_PASS=0
 TEST_FAIL=0
 
@@ -31,8 +31,9 @@ parse_df_value() {
 run_test() {
     cleanup
 
-    $VFS_EXEC "$IMAGE" mkfs "$DISK_SIZE" > /dev/null 2>&1
+    $VFS_EXEC "$IMAGE" mkfs "$DISK_SIZE"
     print_result $? "mkfs creates image" 0
+
 
     ######################
     # Test initial df
@@ -75,8 +76,8 @@ run_test() {
     ######################
     # Try rmdir on nonexistent path
     ######################
-    $VFS_EXEC "$IMAGE" rmdir /no-such-dir > /dev/null 2>&1
-    print_result $? "rmdir /no-such-dir fails" 1
+    $VFS_EXEC "$IMAGE" rmdir /no-such-dir >/dev/null 2>&1
+    print_result $? "rmdir /no-such-dir fails with ENOENT" 1
 
     ######################
     # Compare df stats after rmdir
@@ -88,6 +89,43 @@ run_test() {
 
     ((free_blocks_after >= free_blocks_before)) && print_result 0 "df free blocks increased after rmdir" 0 || print_result 1 "df free blocks increased after rmdir" 0
     ((free_inodes_after >= free_inodes_before)) && print_result 0 "df free inodes increased after rmdir" 0 || print_result 1 "df free inodes increased after rmdir" 0
+
+    cleanup
+
+    ######################
+    # External Copy Tests
+    ######################
+
+    # Re-initialize disk
+    $VFS_EXEC "$IMAGE" mkfs "$DISK_SIZE" > /dev/null 2>&1
+
+    # Prepare external file
+    EXT_IN="external_input.txt"
+    EXT_OUT="external_output.txt"
+    echo "Hello from host!" > "$EXT_IN"
+
+    # Copy to VFS
+    $VFS_EXEC "$IMAGE" ecpt "$EXT_IN" /copied.txt > /dev/null 2>&1
+    print_result $? "ecpt copies external file into VFS" 0
+
+    # Check VFS contents via ls
+    $VFS_EXEC "$IMAGE" ls / | grep -q "copied.txt"
+    print_result $? "ls shows copied.txt in VFS" 0
+
+    # Copy from VFS to host
+    rm -f "$EXT_OUT"
+    $VFS_EXEC "$IMAGE" ecpf /copied.txt "$EXT_OUT" > /dev/null 2>&1
+    print_result $? "ecpf copies file from VFS to host" 0
+
+    # Verify file contents match
+    if cmp -s "$EXT_IN" "$EXT_OUT"; then
+        print_result 0 "ecpf output matches ecpt input" 0
+    else
+        print_result 1 "ecpf output matches ecpt input" 0
+    fi
+
+    # Cleanup temp files
+    rm -f "$EXT_IN" "$EXT_OUT"
 
     cleanup
 }
