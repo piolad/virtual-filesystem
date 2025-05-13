@@ -255,11 +255,8 @@ static uint32_t path_lookup(FILE *fp,
                 *parent_out = cur_idx;
             if (leaf_out&& tok)
             {
-                fprintf(stderr, "before issue:\n"); // <- issue?
                 size_t len = strnlen(tok, MAX_FILENAME - 1);
-                fprintf(stderr, "hello?\n"); // <- not printed:(
                 strncpy(leaf_out, tok, len);
-                fprintf(stderr, "hello?\n"); // <- not printed:(
                 leaf_out[len] = '\0';
             }
 
@@ -411,6 +408,91 @@ static void cmd_ls(const char *img, const char *path)
     fclose(fp);
 }
 
+static void cmd_df(const char *img)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    printf("Total Blocks: %u\n", sb.totalBlockCount);
+    printf("Free Blocks:  %u\n", sb.freeBlockCount);
+    printf("Used Blocks:  %u\n", sb.totalBlockCount - sb.freeBlockCount);
+    printf("Total Inodes: %u\n", sb.totalInodeCount);
+    printf("Free Inodes:  %u\n", sb.freeInodeCount);
+    printf("Used Inodes:  %u\n", sb.totalInodeCount - sb.freeInodeCount);
+
+    fclose(fp);
+}
+
+
+static void cmd_rmdir(const char *img, const char *path)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    uint32_t parent_idx;
+    char name[MAX_FILENAME];
+    uint32_t target_ino_idx = path_lookup(fp, path, &parent_idx, name);
+
+    if (target_ino_idx == UINT32_MAX)
+        die("rmdir: directory not found");
+
+    Inode target_ino;
+    read_inode(fp, target_ino_idx, &target_ino);
+
+    if (!target_ino.isDirectory)
+        die("rmdir: not a directory");
+
+    // Read the directory block to ensure it's empty
+    DirectoryEntry entries[DIRS_PER_BLOCK];
+    read_block(fp, target_ino.directPointers[0], entries);
+
+    int entry_count = 0;
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+    {
+        if (entries[i].inodeIndex != 0)
+        {
+            if (strcmp(entries[i].name, ".") != 0 && strcmp(entries[i].name, "..") != 0)
+                die("rmdir: directory not empty");
+            entry_count++;
+        }
+    }
+
+    if (entry_count <= 0)
+        die("rmdir: corrupted directory");
+
+    // Remove the directory entry from the parent
+    Inode parent_ino;
+    read_inode(fp, parent_idx, &parent_ino);
+    DirectoryEntry parent_entries[DIRS_PER_BLOCK];
+    read_block(fp, parent_ino.directPointers[0], parent_entries);
+
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+    {
+        if (parent_entries[i].inodeIndex == target_ino_idx &&
+            strncmp(parent_entries[i].name, name, MAX_FILENAME) == 0)
+        {
+            parent_entries[i].inodeIndex = 0;
+            parent_entries[i].name[0] = '\0';
+            parent_ino.size -= sizeof(DirectoryEntry);
+            write_block(fp, parent_ino.directPointers[0], parent_entries);
+            write_inode(fp, parent_idx, &parent_ino);
+            break;
+        }
+    }
+
+    // Free inode and block
+    free_in_bitmap(fp, INODE_BITMAP_OFFSET, target_ino_idx);
+    free_in_bitmap(fp, BLOCK_BITMAP_OFFSET, target_ino.directPointers[0]);
+
+    sb.freeInodeCount++;
+    sb.freeBlockCount++;
+    store_super(fp);
+
+    fclose(fp);
+    printf("rmdir: removed %s\n", path);
+}
+
+
 void init_disk(const char *filename, size_t disk_size)
 {
 
@@ -561,6 +643,26 @@ int main(int argc, char *argv[])
         }
         cmd_ls(img, argv[3]);
         return 0;
+    }
+    else if(strcmp(cmd, "df") == 0)
+    {
+        if (argc != 3)
+        {
+            usage();
+            return 1;
+        }
+        cmd_df(img);
+        return 0;
+    }
+    else if (strcmp(cmd, "rmdir") == 0)
+    {
+        if (argc != 4)
+        {
+            usage();
+            return 1;
+        }
+        cmd_rmdir(img, argv[3]);
+        return 0; 
     }
 
     usage();

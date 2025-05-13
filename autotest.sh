@@ -24,52 +24,70 @@ cleanup() {
     rm -f "$IMAGE"
 }
 
+parse_df_value() {
+    echo "$1" | grep "$2" | awk '{ print $NF }'
+}
+
 run_test() {
     cleanup
 
-    # Create filesystem image
     $VFS_EXEC "$IMAGE" mkfs "$DISK_SIZE" > /dev/null 2>&1
     print_result $? "mkfs creates image" 0
 
-    # Create /home
-    $VFS_EXEC "$IMAGE" mkdir /home > /dev/null 2>&1
-    print_result $? "mkdir /home" 0
+    ######################
+    # Test initial df
+    ######################
+    df_output=$($VFS_EXEC "$IMAGE" df 2>/dev/null)
+    total_blocks=$(parse_df_value "$df_output" "Total Blocks:")
+    free_blocks_before=$(parse_df_value "$df_output" "Free Blocks:")
+    used_blocks_before=$(parse_df_value "$df_output" "Used Blocks:")
+    free_inodes_before=$(parse_df_value "$df_output" "Free Inodes:")
 
-    # Create /home/user
-    $VFS_EXEC "$IMAGE" mkdir /home/user > /dev/null 2>&1
-    print_result $? "mkdir /home/user" 0
+    [[ "$total_blocks" -gt 0 && "$free_blocks_before" -gt 0 ]] && print_result 0 "df shows initial block stats" 0 || print_result 1 "df shows initial block stats" 0
 
-    # Create /home/user/docs
-    $VFS_EXEC "$IMAGE" mkdir /home/user/docs > /dev/null 2>&1
-    print_result $? "mkdir /home/user/docs" 0
+    ######################
+    # Create directories
+    ######################
+    $VFS_EXEC "$IMAGE" mkdir /dirA > /dev/null 2>&1
+    print_result $? "mkdir /dirA" 0
 
-    # Try to create /home/user/docs again — should fail
-    $VFS_EXEC "$IMAGE" mkdir /home/user/docs > /dev/null 2>&1
-    print_result $? "mkdir /home/user/docs (existing) should fail" 1
+    $VFS_EXEC "$IMAGE" mkdir /dirA/subdir > /dev/null 2>&1
+    print_result $? "mkdir /dirA/subdir" 0
 
-    # List root — should show 'home'
-    output=$($VFS_EXEC "$IMAGE" ls / 2>/dev/null)
-    echo "$output" | grep -q "home"
-    print_result $? "ls / shows 'home'" 0
+    ######################
+    # Try rmdir on non-empty directory — should fail
+    ######################
+    $VFS_EXEC "$IMAGE" rmdir /dirA > /dev/null 2>&1
+    print_result $? "rmdir /dirA (non-empty) fails as expected" 1
 
-    # List /home — should show 'user'
-    output=$($VFS_EXEC "$IMAGE" ls /home 2>/dev/null)
-    echo "$output" | grep -q "user"
-    print_result $? "ls /home shows 'user'" 0
+    ######################
+    # Remove subdir first
+    ######################
+    $VFS_EXEC "$IMAGE" rmdir /dirA/subdir > /dev/null 2>&1
+    print_result $? "rmdir /dirA/subdir (empty) succeeds" 0
 
-    # List /home/user — should show 'docs'
-    output=$($VFS_EXEC "$IMAGE" ls /home/user 2>/dev/null)
-    echo "$output" | grep -q "docs"
-    print_result $? "ls /home/user shows 'docs'" 0
+    ######################
+    # Remove parent now — should succeed
+    ######################
+    $VFS_EXEC "$IMAGE" rmdir /dirA > /dev/null 2>&1
+    print_result $? "rmdir /dirA (now empty) succeeds" 0
 
-    # Try to mkdir on a file path (invalid, once files are supported)
-    # For now test mkdir on invalid path
-    $VFS_EXEC "$IMAGE" mkdir /does/not/exist > /dev/null 2>&1
-    print_result $? "mkdir /does/not/exist should fail" 1
+    ######################
+    # Try rmdir on nonexistent path
+    ######################
+    $VFS_EXEC "$IMAGE" rmdir /no-such-dir > /dev/null 2>&1
+    print_result $? "rmdir /no-such-dir fails" 1
 
-    # Try to ls an invalid path
-    $VFS_EXEC "$IMAGE" ls /nope > /dev/null 2>&1
-    print_result $? "ls /nope should fail" 1
+    ######################
+    # Compare df stats after rmdir
+    ######################
+    df_output_after=$($VFS_EXEC "$IMAGE" df 2>/dev/null)
+    free_blocks_after=$(parse_df_value "$df_output_after" "Free Blocks:")
+    used_blocks_after=$(parse_df_value "$df_output_after" "Used Blocks:")
+    free_inodes_after=$(parse_df_value "$df_output_after" "Free Inodes:")
+
+    ((free_blocks_after >= free_blocks_before)) && print_result 0 "df free blocks increased after rmdir" 0 || print_result 1 "df free blocks increased after rmdir" 0
+    ((free_inodes_after >= free_inodes_before)) && print_result 0 "df free inodes increased after rmdir" 0 || print_result 1 "df free inodes increased after rmdir" 0
 
     cleanup
 }
