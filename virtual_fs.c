@@ -343,7 +343,6 @@ static void cmd_ls(const char *img, const char *path)
 
 
     uint32_t inode_idx;
-    char last[MAX_FILENAME];
 
     if (strcmp(path, "/") == 0)
     {
@@ -689,6 +688,245 @@ void init_disk(const char *filename, size_t disk_size)
     fclose(fp);
 }
 
+static void cmd_lsdf(const char *img, const char *path);
+static void cmd_crhl(const char *img, const char *src, const char *dst);
+static void cmd_rm  (const char *img, const char *path);
+static void cmd_ext (const char *img, const char *path, uint32_t add);
+static void cmd_red (const char *img, const char *path, uint32_t sub);
+
+static uint64_t compute_usage(FILE *fp, uint32_t ino_idx);
+
+static void release_block(FILE *fp, uint32_t blk)
+{
+    free_in_bitmap(fp, BLOCK_BITMAP_OFFSET, blk);
+    sb.freeBlockCount++;
+}
+
+static void release_inode_and_data(FILE *fp, uint32_t ino_idx, Inode *ino)
+{
+    /* free payload blocks (direct only) */
+    uint32_t blks = (ino->size + BLOCKSIZE - 1) / BLOCKSIZE;
+    for (uint32_t i = 0; i < blks; ++i)
+        if (ino->directPointers[i])
+            release_block(fp, ino->directPointers[i]);
+
+    /* release inode itself */
+    free_in_bitmap(fp, INODE_BITMAP_OFFSET, ino_idx);
+    sb.freeInodeCount++;
+}
+
+static uint64_t compute_usage(FILE *fp, uint32_t ino_idx)
+{
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
+
+    if (!ino.isDirectory)      /* regular file */
+        return ((ino.size + BLOCKSIZE - 1) / BLOCKSIZE) * BLOCKSIZE;
+
+    /* directory: own 1 block + children */
+    uint64_t total = BLOCKSIZE;
+    DirectoryEntry ent[DIRS_PER_BLOCK];
+    read_block(fp, ino.directPointers[0], ent);
+
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+        if (ent[i].inodeIndex &&
+            strcmp(ent[i].name, ".")  && strcmp(ent[i].name, ".."))
+            total += compute_usage(fp, ent[i].inodeIndex);
+    return total;
+}
+
+static void cmd_lsdf(const char *img, const char *path)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    uint32_t parent_idx;
+    char leaf[MAX_FILENAME];
+    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, leaf);
+    if (ino_idx == parent_idx)
+        die("lsdf: path not found");
+
+    uint64_t bytes = compute_usage(fp, ino_idx);
+    printf("%s: %llu bytes (%.2f KiB, %.2f MiB)\n",
+           path, (unsigned long long)bytes,
+           bytes / 1024.0, bytes / (1024.0 * 1024.0));
+
+    fclose(fp);
+}
+
+
+static void cmd_crhl(const char *img, const char *src, const char *dst)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    /* resolve source */
+    uint32_t src_parent;
+    char     src_leaf[MAX_FILENAME];
+    uint32_t src_ino = path_lookup(fp, src, &src_parent, src_leaf);
+    if (src_ino == src_parent)
+        die("crhl: source not found");
+
+    /* resolve (non-existing) destination */
+    uint32_t dst_parent;
+    char     dst_leaf[MAX_FILENAME];
+    uint32_t dst_found = path_lookup(fp, dst, &dst_parent, dst_leaf);
+    if (dst_found != dst_parent)
+        die("crhl: destination already exists");
+
+    /* add entry into destination directory */
+    Inode parent;
+    read_inode(fp, dst_parent, &parent);
+    if (!parent.isDirectory) die("crhl: dest-parent not a directory");
+
+    if (add_entry_to_dir(fp, &parent, dst_parent, dst_leaf, src_ino) < 0)
+        die("crhl: parent directory full");
+
+    /* bump link-count */
+    Inode target;
+    read_inode(fp, src_ino, &target);
+    target.linkCount++;
+    write_inode(fp, src_ino, &target);
+
+    fclose(fp);
+    printf("crhl: linked %s → %s\n", dst, src);
+}
+
+static void cmd_rm(const char *img, const char *path)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    uint32_t parent_idx;
+    char leaf[MAX_FILENAME];
+    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, leaf);
+    if (ino_idx == parent_idx)
+        die("rm: path not found");
+
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
+    if (ino.isDirectory)
+        die("rm: use rmdir for directories");
+
+    /* remove entry from parent dir */
+    Inode parent;
+    read_inode(fp, parent_idx, &parent);
+    DirectoryEntry ent[DIRS_PER_BLOCK];
+    read_block(fp, parent.directPointers[0], ent);
+
+    bool removed = false;
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+        if (ent[i].inodeIndex == ino_idx &&
+            strncmp(ent[i].name, leaf, MAX_FILENAME) == 0)
+        {
+            ent[i].inodeIndex = 0;
+            ent[i].name[0]    = '\0';
+            parent.size      -= sizeof(DirectoryEntry);
+            removed = true;
+            break;
+        }
+    if (!removed) die("rm: corrupt parent directory");
+
+    write_block(fp, parent.directPointers[0], ent);
+    write_inode (fp, parent_idx, &parent);
+
+    /* decrement link count + possibly free */
+    ino.linkCount--;
+    if (ino.linkCount == 0)
+        release_inode_and_data(fp, ino_idx, &ino);
+    else
+        write_inode(fp, ino_idx, &ino);
+
+    store_super(fp);
+    fclose(fp);
+    printf("rm: removed %s\n", path);
+}
+
+static void cmd_ext(const char *img, const char *path, uint32_t add)
+{
+    if (!add) return;
+
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    uint32_t pidx;
+    char leaf[MAX_FILENAME];
+    uint32_t ino_idx = path_lookup(fp, path, &pidx, leaf);
+    if (ino_idx == pidx) die("ext: path not found");
+
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
+    if (ino.isDirectory) die("ext: cannot extend a directory");
+
+    uint32_t old_size   = ino.size;
+    uint32_t new_size   = old_size + add;
+    uint32_t old_blocks = (old_size + BLOCKSIZE - 1) / BLOCKSIZE;
+    uint32_t new_blocks = (new_size + BLOCKSIZE - 1) / BLOCKSIZE;
+
+    if (new_blocks > DIRECTBLOCK_CNT)
+        die("ext: exceeds max direct blocks (12)");
+
+    /* allocate extra blocks if needed */
+    for (uint32_t i = old_blocks; i < new_blocks; ++i) {
+        uint32_t b = alloc_block(fp);
+        if (b == UINT32_MAX) die("ext: out of blocks");
+        ino.directPointers[i] = b;
+        sb.freeBlockCount--;
+        /* zero-fill new block */
+        uint8_t z[BLOCKSIZE]={0};
+        write_block(fp, b, z);
+    }
+
+    ino.size = new_size;
+    write_inode(fp, ino_idx, &ino);
+    store_super(fp);
+    fclose(fp);
+    printf("ext: %u bytes added to %s (new size %u)\n",
+           add, path, new_size);
+}
+
+/* ────  red – reduce a file by N bytes  ───────────────────────────────────── */
+static void cmd_red(const char *img, const char *path, uint32_t sub)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    uint32_t pidx;
+    char leaf[MAX_FILENAME];
+    uint32_t ino_idx = path_lookup(fp, path, &pidx, leaf);
+    if (ino_idx == pidx) die("red: path not found");
+
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
+    if (ino.isDirectory) die("red: cannot shrink a directory");
+
+    if (sub >= ino.size) {            /* truncate to empty */
+        release_inode_and_data(fp, ino_idx, &ino);
+        store_super(fp);
+        fclose(fp);
+        printf("red: %s truncated to 0\n", path);
+        return;
+    }
+
+    uint32_t new_size   = ino.size - sub;
+    uint32_t old_blocks = (ino.size + BLOCKSIZE - 1) / BLOCKSIZE;
+    uint32_t new_blocks = (new_size + BLOCKSIZE - 1) / BLOCKSIZE;
+
+    /* free surplus blocks */
+    for (uint32_t i = new_blocks; i < old_blocks; ++i)
+        if (ino.directPointers[i]) {
+            release_block(fp, ino.directPointers[i]);
+            ino.directPointers[i] = 0;
+        }
+
+    ino.size = new_size;
+    write_inode(fp, ino_idx, &ino);
+    store_super(fp);
+    fclose(fp);
+    printf("red: %u bytes removed from %s (new size %u)\n",
+           sub, path, new_size);
+}
+
 void usage()
 {
     printf("Usage: vfs <imagepath> <command> [args]\n");
@@ -787,6 +1025,36 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_ecpf(img, argv[3], argv[4]);
+        return 0;
+    }
+    else if (strcmp(cmd, "lsdf") == 0)
+    {
+        if (argc != 4) { usage(); return 1; }
+        cmd_lsdf(img, argv[3]);
+        return 0;
+    }
+    else if (strcmp(cmd, "crhl") == 0)
+    {
+        if (argc != 5) { usage(); return 1; }
+        cmd_crhl(img, argv[3], argv[4]);
+        return 0;
+    }
+    else if (strcmp(cmd, "rm") == 0)
+    {
+        if (argc != 4) { usage(); return 1; }
+        cmd_rm(img, argv[3]);
+        return 0;
+    }
+    else if (strcmp(cmd, "ext") == 0)
+    {
+        if (argc != 5) { usage(); return 1; }
+        cmd_ext(img, argv[3], (uint32_t)strtoul(argv[4], NULL, 10));
+        return 0;
+    }
+    else if (strcmp(cmd, "red") == 0)
+    {
+        if (argc != 5) { usage(); return 1; }
+        cmd_red(img, argv[3], (uint32_t)strtoul(argv[4], NULL, 10));
         return 0;
     }
 

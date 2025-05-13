@@ -1,139 +1,169 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
+IFS=$'\n\t'
 
 VFS_EXEC="./vfs"
 IMAGE="test.img"
-DISK_SIZE=$((4*1024 * 1024))  # 4MB
-TEST_PASS=0
-TEST_FAIL=0
+DISK_SIZE=$((4 * 1024 * 1024))        # 4 MiB
+BLOCKSIZE=1024
 
-print_result() {
-    local status=$1
-    local message="$2"
-    local expected_status=$3
-    if [ "$status" -eq "$expected_status" ]; then
-        echo "[PASS] $message"
-        ((TEST_PASS++))
+PASS=0
+FAIL=0
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+print_result () {
+    local rc=$1 want=$3 msg=$2
+    if [[ $rc -eq $want ]]; then
+        printf '[PASS] %s\n' "$msg"
+        ((PASS++))
     else
-        echo "[FAIL] $message"
-        echo "       Expected exit code $expected_status but got $status"
-        ((TEST_FAIL++))
+        printf '[FAIL] %s\n        expected %d got %d\n' "$msg" "$want" "$rc"
+        ((FAIL++))
     fi
 }
 
-cleanup() {
-    rm -f "$IMAGE"
+cleanup () { rm -f "$IMAGE" tmp.*; }
+trap cleanup EXIT
+
+df_field () {               # usage: df_field "string" "Free Blocks:"
+    printf '%s\n' "$1" | awk -v k="$2" '$0~k{print $(NF)}'
 }
 
-parse_df_value() {
-    echo "$1" | grep "$2" | awk '{ print $NF }'
+lsdf_bytes () {              # usage: lsdf_bytes "/file"
+    local out
+    out=$("$VFS_EXEC" "$IMAGE" lsdf "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$out" | awk -F'[: ]+' '{print $(NF-7)}'
 }
 
-run_test() {
-    cleanup
-
-    $VFS_EXEC "$IMAGE" mkfs "$DISK_SIZE"
-    print_result $? "mkfs creates image" 0
-
-
-    ######################
-    # Test initial df
-    ######################
-    df_output=$($VFS_EXEC "$IMAGE" df 2>/dev/null)
-    total_blocks=$(parse_df_value "$df_output" "Total Blocks:")
-    free_blocks_before=$(parse_df_value "$df_output" "Free Blocks:")
-    used_blocks_before=$(parse_df_value "$df_output" "Used Blocks:")
-    free_inodes_before=$(parse_df_value "$df_output" "Free Inodes:")
-
-    [[ "$total_blocks" -gt 0 && "$free_blocks_before" -gt 0 ]] && print_result 0 "df shows initial block stats" 0 || print_result 1 "df shows initial block stats" 0
-
-    ######################
-    # Create directories
-    ######################
-    $VFS_EXEC "$IMAGE" mkdir /dirA > /dev/null 2>&1
-    print_result $? "mkdir /dirA" 0
-
-    $VFS_EXEC "$IMAGE" mkdir /dirA/subdir > /dev/null 2>&1
-    print_result $? "mkdir /dirA/subdir" 0
-
-    ######################
-    # Try rmdir on non-empty directory — should fail
-    ######################
-    $VFS_EXEC "$IMAGE" rmdir /dirA > /dev/null 2>&1
-    print_result $? "rmdir /dirA (non-empty) fails as expected" 1
-
-    ######################
-    # Remove subdir first
-    ######################
-    $VFS_EXEC "$IMAGE" rmdir /dirA/subdir > /dev/null 2>&1
-    print_result $? "rmdir /dirA/subdir (empty) succeeds" 0
-
-    ######################
-    # Remove parent now — should succeed
-    ######################
-    $VFS_EXEC "$IMAGE" rmdir /dirA > /dev/null 2>&1
-    print_result $? "rmdir /dirA (now empty) succeeds" 0
-
-    ######################
-    # Try rmdir on nonexistent path
-    ######################
-    $VFS_EXEC "$IMAGE" rmdir /no-such-dir >/dev/null 2>&1
-    print_result $? "rmdir /no-such-dir fails with ENOENT" 1
-
-    ######################
-    # Compare df stats after rmdir
-    ######################
-    df_output_after=$($VFS_EXEC "$IMAGE" df 2>/dev/null)
-    free_blocks_after=$(parse_df_value "$df_output_after" "Free Blocks:")
-    used_blocks_after=$(parse_df_value "$df_output_after" "Used Blocks:")
-    free_inodes_after=$(parse_df_value "$df_output_after" "Free Inodes:")
-
-    ((free_blocks_after >= free_blocks_before)) && print_result 0 "df free blocks increased after rmdir" 0 || print_result 1 "df free blocks increased after rmdir" 0
-    ((free_inodes_after >= free_inodes_before)) && print_result 0 "df free inodes increased after rmdir" 0 || print_result 1 "df free inodes increased after rmdir" 0
-
-    cleanup
-
-    ######################
-    # External Copy Tests
-    ######################
-
-    # Re-initialize disk
-    $VFS_EXEC "$IMAGE" mkfs "$DISK_SIZE" > /dev/null 2>&1
-
-    # Prepare external file
-    EXT_IN="external_input.txt"
-    EXT_OUT="external_output.txt"
-    echo "Hello from host!" > "$EXT_IN"
-
-    # Copy to VFS
-    $VFS_EXEC "$IMAGE" ecpt "$EXT_IN" /copied.txt > /dev/null 2>&1
-    print_result $? "ecpt copies external file into VFS" 0
-
-    # Check VFS contents via ls
-    $VFS_EXEC "$IMAGE" ls / | grep -q "copied.txt"
-    print_result $? "ls shows copied.txt in VFS" 0
-
-    # Copy from VFS to host
-    rm -f "$EXT_OUT"
-    $VFS_EXEC "$IMAGE" ecpf /copied.txt "$EXT_OUT" > /dev/null 2>&1
-    print_result $? "ecpf copies file from VFS to host" 0
-
-    # Verify file contents match
-    if cmp -s "$EXT_IN" "$EXT_OUT"; then
-        print_result 0 "ecpf output matches ecpt input" 0
+# numerical compare wrapper (print_result compatible)
+num_expect () {
+    local lhs=$1 op=$2 rhs=$3 msg=$4
+    if [[ $(awk "BEGIN{print ($lhs $op $rhs)?0:1}") -eq 0 ]]; then
+        print_result 0 "$msg" 0
     else
-        print_result 1 "ecpf output matches ecpt input" 0
+        print_result 1 "$msg" 0
     fi
-
-    # Cleanup temp files
-    rm -f "$EXT_IN" "$EXT_OUT"
-
-    cleanup
 }
 
-echo "Running vfs automated tests..."
-run_test
+###############################################################################
+echo 'Running VFS automated tests…'
+###############################################################################
+cleanup
+"$VFS_EXEC" "$IMAGE" mkfs "$DISK_SIZE"
+print_result $? 'mkfs creates image' 0
+
+# ── basic df ────────────────────────────────────────────────────────────────
+df1="$("$VFS_EXEC" "$IMAGE" df)"
+tb=$(df_field "$df1" 'Total Blocks:'); fb1=$(df_field "$df1" 'Free Blocks:')
+ui1=$(df_field "$df1" 'Free Inodes:')
+num_expect "$tb"  -gt 0 'df shows total blocks'
+num_expect "$fb1" -gt 0 'df shows free blocks'
+
+# ── mkdir / rmdir  ──────────────────────────────────────────────────────────
+"$VFS_EXEC" "$IMAGE" mkdir /dirA      >/dev/null 2>&1
+print_result $? 'mkdir /dirA' 0
+"$VFS_EXEC" "$IMAGE" mkdir /dirA/sub  >/dev/null 2>&1
+print_result $? 'mkdir /dirA/sub' 0
+
+"$VFS_EXEC" "$IMAGE" rmdir /dirA      >/dev/null 2>&1
+print_result $? 'rmdir non-empty /dirA fails' 1
+"$VFS_EXEC" "$IMAGE" rmdir /dirA/sub  >/dev/null 2>&1
+print_result $? 'rmdir /dirA/sub succeeds' 0
+"$VFS_EXEC" "$IMAGE" rmdir /dirA      >/dev/null 2>&1
+print_result $? 'rmdir now-empty /dirA succeeds' 0
+"$VFS_EXEC" "$IMAGE" rmdir /nope      >/dev/null 2>&1
+print_result $? 'rmdir non-existent fails' 1
+
+# verify resources got freed
+df2="$("$VFS_EXEC" "$IMAGE" df)"
+fb2=$(df_field "$df2" 'Free Blocks:'); ui2=$(df_field "$df2" 'Free Inodes:')
+num_expect "$fb2" -ge "$fb1" 'free blocks did not decrease after rmdir'
+num_expect "$ui2" -ge "$ui1" 'free inodes did not decrease after rmdir'
+
+###############################################################################
+# external copy <-> host
+###############################################################################
+EXT_IN=$(mktemp tmp.in.XXXX); EXT_OUT=$(mktemp tmp.out.XXXX)
+echo "Hello from host!" >"$EXT_IN"
+
+"$VFS_EXEC" "$IMAGE" ecpt "$EXT_IN" /greeting.txt >/dev/null 2>&1
+print_result $? 'ecpt copies host file' 0
+"$VFS_EXEC" "$IMAGE" ls /        | grep -q 'greeting.txt'
+print_result $? 'ls shows greeting.txt' 0
+"$VFS_EXEC" "$IMAGE" ecpf /greeting.txt "$EXT_OUT" >/dev/null 2>&1
+print_result $? 'ecpf copies back to host' 0
+cmp -s "$EXT_IN" "$EXT_OUT"
+print_result $? 'round-trip data identical' 0
+rm -f "$EXT_IN" "$EXT_OUT"
+
+###############################################################################
+# lsdf  (size should be 1 KiB)
+###############################################################################
+sz=$(lsdf_bytes /greeting.txt)
+print_result $? 'lsdf runs' 0
+num_expect "$sz" -eq "$BLOCKSIZE" 'lsdf returns 1-block allocation for small file'
+
+###############################################################################
+# hard-link, unlink, ref-count behaviour
+###############################################################################
+"$VFS_EXEC" "$IMAGE" crhl /greeting.txt /link.txt >/dev/null 2>&1
+print_result $? 'crhl creates hard link' 0
+"$VFS_EXEC" "$IMAGE" ls / | grep -q 'link.txt'
+print_result $? 'ls shows link.txt' 0
+
+# capture counts
+df3="$("$VFS_EXEC" "$IMAGE" df)"
+fb3=$(df_field "$df3" 'Free Blocks:'); ui3=$(df_field "$df3" 'Free Inodes:')
+
+"$VFS_EXEC" "$IMAGE" rm /greeting.txt >/dev/null 2>&1
+print_result $? 'rm original path' 0
+"$VFS_EXEC" "$IMAGE" ls / | grep -vq 'greeting.txt'
+print_result $? 'original entry gone' 0
+"$VFS_EXEC" "$IMAGE" ls / | grep -q  'link.txt'
+print_result $? 'link.txt still exists' 0
+df4="$("$VFS_EXEC" "$IMAGE" df)"
+num_expect "$(df_field "$df4" 'Free Blocks:')" -eq "$fb3" \
+            'blocks unchanged (linkcount>0)'
+num_expect "$(df_field "$df4" 'Free Inodes:')" -eq "$ui3" \
+            'inodes unchanged (linkcount>0)'
+
+"$VFS_EXEC" "$IMAGE" rm /link.txt >/dev/null 2>&1
+print_result $? 'rm final link' 0
+df5="$("$VFS_EXEC" "$IMAGE" df)"
+num_expect "$(df_field "$df5" 'Free Blocks:')" -gt "$fb3" \
+            'blocks freed after last link'
+num_expect "$(df_field "$df5" 'Free Inodes:')" -gt "$ui3" \
+            'inode freed after last link'
+
+###############################################################################
+# ext / red   (allocate & release blocks)
+###############################################################################
+# create 2 000-byte file via ecpt
+PAYLOAD=$(mktemp tmp.pay.XXXX); head -c 2000 </dev/zero >"$PAYLOAD"
+"$VFS_EXEC" "$IMAGE" ecpt "$PAYLOAD" /grow.txt >/dev/null 2>&1
+sz0=$(lsdf_bytes /grow.txt)           # should be 2048
+printf '[PASS] initial size 2000 -> %d B on disk\n' "$sz0"; ((PASS++))
+
+# extend by 1 500 -> size 3 500 (4 blocks on disk)
+"$VFS_EXEC" "$IMAGE" ext /grow.txt 1500 >/dev/null 2>&1
+print_result $? 'ext succeeds' 0
+sz1=$(lsdf_bytes /grow.txt)
+num_expect "$sz1" -eq $((4*BLOCKSIZE)) 'size after ext is 4 blocks'
+
+# reduce by 3 000 -> size 500 (1 block on disk)
+"$VFS_EXEC" "$IMAGE" red /grow.txt 3000 >/dev/null 2>&1
+print_result $? 'red succeeds' 0
+sz2=$(lsdf_bytes /grow.txt)
+num_expect "$sz2" -eq $((1*BLOCKSIZE)) 'size after red is 1 block'
+df6="$("$VFS_EXEC" "$IMAGE" df)"
+num_expect "$(df_field "$df6" 'Free Blocks:')" -gt "$(df_field "$df5" 'Free Blocks:')" \
+            'blocks freed after red'
+
+# extend beyond the 12 KB limit should fail
+"$VFS_EXEC" "$IMAGE" ext /grow.txt 13000 >/dev/null 2>&1
+print_result $? 'ext beyond 12 KiB fails' 1
+
+###############################################################################
 echo
-echo "Tests Passed: $TEST_PASS"
-echo "Tests Failed: $TEST_FAIL"
-
-exit $TEST_FAIL
+printf 'Summary: %d passed – %d failed\n' "$PASS" "$FAIL"
+exit $FAIL
