@@ -1,16 +1,15 @@
-CC      := gcc
-CFLAGS  := -std=c17 -Wall -Wextra -g -fsanitize=address 
-LDFLAGS :=
-TARGET  := vfs
-SRC     := virtual_fs.c
+
+CC = gcc
+CFLAGS = -Wall -Wextra
+TARGET = vfs
+SRC = virtual_fs.c
+
+.PHONY: all clean
 
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
-
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
 clean:
-	rm -f $(TARGET) *.o
-
-.PHONY: all debug clean
+	rm -f $(TARGET)

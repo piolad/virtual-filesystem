@@ -6,7 +6,7 @@
             "request": "launch",
             "program": "${fileDirname}/${fileBasenameNoExtension}",
             "args": [
-                "disk87.img", "mkdir", "/home"
+                "disk.img", "mkdir", "/home"
             ],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
