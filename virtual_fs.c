@@ -65,7 +65,7 @@ typedef struct
 uint8_t buf[BLOCKSIZE];
 static SuperBlock sb;
 
-static void die(const char *msg)
+void die(const char *msg)
 {
     perror(msg);
     exit(EXIT_FAILURE);
@@ -79,55 +79,56 @@ static FILE *open_image_rw(const char *path)
     return fp;
 }
 
-static void read_at(FILE *fp, off_t off, void *buf, size_t n)
+void read_at(FILE *fp, uint64_t off, void *buf, size_t n)
 {
     if (fseeko(fp, off, SEEK_SET) || fread(buf, 1, n, fp) != n)
         die("read_at");
         
 }
 
-static void write_at(FILE *fp, off_t off, const void *buf, size_t n)
+void write_at(FILE *fp, uint64_t off, const void *buf, size_t n)
 {
     if (fseeko(fp, off, SEEK_SET) || fwrite(buf, 1, n, fp) != n)
         die("write_at");
 }
 
-static void load_super(FILE *fp)
+void load_super(FILE *fp)
 {
     read_at(fp, 0, &sb, sizeof sb);
 }
 
-static void store_super(FILE *fp)
+void store_super(FILE *fp)
 {
     write_at(fp, 0, &sb, sizeof sb);
 }
 
-static void read_inode(FILE *fp, uint32_t idx, Inode *ino)
+void read_inode(FILE *fp, uint32_t idx, Inode *ino)
 {
     uint64_t off = INODE_TABLE_OFFSET + idx * INODE_SIZE;
     read_at(fp, off, ino, sizeof *ino);
 }
 
-static void write_inode(FILE *fp, uint32_t idx, const Inode *ino)
+void write_inode(FILE *fp, uint32_t idx, Inode *ino)
 {
     uint64_t off = INODE_TABLE_OFFSET + idx * INODE_SIZE;
     write_at(fp, off, ino, sizeof *ino);
 }
 
-static void read_block(FILE *fp, uint32_t blk_no, void *buf)
+void read_block(FILE *fp, uint32_t blk_no, void *buf)
 {
     read_at(fp, blk_no * BLOCKSIZE, buf, BLOCKSIZE);
 }
 
-static void write_block(FILE *fp, uint32_t blk_no, const void *buf)
+void write_block(FILE *fp, uint32_t blk_no, const void *buf)
 {
     write_at(fp, blk_no * BLOCKSIZE, buf, BLOCKSIZE);
 }
 
-static uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off, uint32_t count)
+// find first free bit in bitmap and allocate
+static uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off)
 {
     uint8_t byte;
-    for (uint32_t i = 0; i < count; i++)
+    for (uint32_t i = 0; i < sb.totalBlockCount; i++)
     {
         uint64_t off = bmp_off + i / 8;
         read_at(fp, off, &byte, 1);
@@ -141,47 +142,48 @@ static uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off, uint32_t count)
     return UINT32_MAX;
 }
 
-static void free_in_bitmap(FILE *fp, uint64_t bmp_off, uint32_t idx)
+void free_in_bitmap(FILE *fp, uint64_t bmp_off, uint32_t idx)
 {
     uint8_t byte;
-    off_t off = bmp_off + idx / 8;
+    uint64_t off = bmp_off + idx / 8;
     read_at(fp, off, &byte, 1);
     byte &= ~(1 << (idx & 7));
     write_at(fp, off, &byte, 1);
 }
 
-static uint32_t alloc_block(FILE *fp) { return alloc_from_bitmap(fp, BLOCK_BITMAP_OFFSET, sb.totalBlockCount); }
-static uint32_t alloc_inode(FILE *fp) { return alloc_from_bitmap(fp, INODE_BITMAP_OFFSET, sb.totalInodeCount); }
+// allocation of a block and an inode look same from bitmap perspetive - just at different offset
+static uint32_t alloc_block(FILE *fp) { return alloc_from_bitmap(fp, BLOCK_BITMAP_OFFSET); }
+static uint32_t alloc_inode(FILE *fp) { return alloc_from_bitmap(fp, INODE_BITMAP_OFFSET); }
 
-static int find_entry_in_block(const DirectoryEntry *block,
-                               const char *name,
+static int find_entry_in_block(DirectoryEntry *block,
+                               char *name,
                                DirectoryEntry *out,
                                uint32_t *out_pos)
 {
-    const DirectoryEntry *de = (const DirectoryEntry *)block;
-    for (uint32_t i = 0; i < BLOCKSIZE / sizeof(DirectoryEntry); ++i)
+    for (uint32_t i = 0; i < BLOCKSIZE / sizeof(DirectoryEntry); i++)
     {
-        if (de[i].inodeIndex && strncmp(de[i].name, name, MAX_FILENAME) == 0)
+        if (block[i].inodeIndex && strncmp(block[i].name, name, MAX_FILENAME) == 0)
         {
             if (out)
-                *out = de[i];
+                *out = block[i];
             if (out_pos)
                 *out_pos = i;
             return 0;
         }
     }
-    return -1; /* not found */
+    return -1; // not found
 }
 
 static int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
                             const char *name, uint32_t inodeNo)
 {
     uint8_t buf[BLOCKSIZE] = {0};
-    DirectoryEntry *dir = (DirectoryEntry *)buf;
     uint32_t blk_no = parent->directPointers[0];
+    DirectoryEntry *dir = (DirectoryEntry *)buf;
 
     read_block(fp, blk_no, buf);
 
+    // find empty slot in the block
     for (uint32_t i = 0; i < BLOCKSIZE / sizeof(DirectoryEntry); i++)
     {
         if (dir[i].inodeIndex == 0)
@@ -207,7 +209,7 @@ static uint32_t path_lookup(FILE *fp,
     if (!path || path[0] != '/')
         return UINT32_MAX;
 
-    if (strcmp(path, "/") == 0)
+    if (path[1] == 0)
     {
         if (parent_out)
             *parent_out = 0;
@@ -215,7 +217,6 @@ static uint32_t path_lookup(FILE *fp,
             strcpy(leaf_out, "/");
         return 0; /* root inode */
     }
-    
 
     char tmp[1024];
     strncpy(tmp, path, sizeof(tmp));
@@ -241,11 +242,16 @@ static uint32_t path_lookup(FILE *fp,
 
         if (!last)
         {
-            if (found != 0) 
+            if (found != 0){
+                free(blk_buf); 
                 return UINT32_MAX;
+            }
             read_inode(fp, child.inodeIndex, &cur);
-            if (!cur.isDirectory) 
+            if (!cur.isDirectory) {
+                free(blk_buf); 
                 return UINT32_MAX;
+            }
+                
             cur_idx = child.inodeIndex; 
         }
         else
@@ -259,7 +265,8 @@ static uint32_t path_lookup(FILE *fp,
                 strncpy(leaf_out, tok, len);
                 leaf_out[len] = '\0';
             }
-
+            
+            free(blk_buf); 
             if (found == 0)
                 return child.inodeIndex;
             else                
@@ -268,19 +275,16 @@ static uint32_t path_lookup(FILE *fp,
         tok = next_tok;
         next_tok = strtok_r(NULL, "/", &saveptr);
     }
-    free(blk_buf); 
 
-    /* should never reach here */
+    free(blk_buf); 
     return UINT32_MAX;
 }
 
-static void cmd_mkdir(const char *img, const char *path)
+void cmd_mkdir(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
-
-    fprintf(stderr, "0\n");
     uint32_t parent_idx;
     char name[MAX_FILENAME];
     if (path_lookup(fp, path, &parent_idx, name) == UINT32_MAX)
@@ -291,8 +295,6 @@ static void cmd_mkdir(const char *img, const char *path)
     if (!parent.isDirectory)
         die("mkdir: parent not dir");
 
-
-        
     DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
     read_block(fp, parent.directPointers[0], blk);
     if (find_entry_in_block(blk, name, NULL, NULL) == 0)
@@ -332,7 +334,7 @@ static void cmd_mkdir(const char *img, const char *path)
     fclose(fp);
     printf("mkdir: created %s\n", path);
 }
-static void cmd_ls(const char *img, const char *path)
+void cmd_ls(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -407,7 +409,7 @@ static void cmd_ls(const char *img, const char *path)
     fclose(fp);
 }
 
-static void cmd_df(const char *img)
+void cmd_df(const char *img)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -423,7 +425,7 @@ static void cmd_df(const char *img)
 }
 
 
-static void cmd_rmdir(const char *img, const char *path)
+void cmd_rmdir(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -446,7 +448,7 @@ static void cmd_rmdir(const char *img, const char *path)
     read_block(fp, target_ino.directPointers[0], entries);
 
     int entry_count = 0;
-    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
     {
         if (entries[i].inodeIndex != 0)
         {
@@ -465,7 +467,7 @@ static void cmd_rmdir(const char *img, const char *path)
     DirectoryEntry parent_entries[DIRS_PER_BLOCK];
     read_block(fp, parent_ino.directPointers[0], parent_entries);
 
-    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
     {
         if (parent_entries[i].inodeIndex == target_ino_idx &&
             strncmp(parent_entries[i].name, name, MAX_FILENAME) == 0)
@@ -491,12 +493,7 @@ static void cmd_rmdir(const char *img, const char *path)
     printf("rmdir: removed %s\n", path);
 }
 
-/* ─── Add right after the existing prototypes ──────────────────────────────── */
-static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path);
-static void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path);
-
-/* ─── Helper: copy a host file → VFS (external copy to) ────────────────────── */
-static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
+void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -527,13 +524,13 @@ static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_pat
     if (need_blocks > sb.freeBlockCount)
         die("ecpt: not enough free blocks");
     uint32_t blk[DIRECTBLOCK_CNT] = {0};
-    for (uint32_t i = 0; i < need_blocks; ++i)
+    for (uint32_t i = 0; i < need_blocks; i++)
         if ((blk[i] = alloc_block(fp)) == UINT32_MAX)
             die("ecpt: alloc_block");
 
     /* write payload */
     uint8_t buf[BLOCKSIZE] = {0};
-    for (uint32_t i = 0; i < need_blocks; ++i) {
+    for (uint32_t i = 0; i < need_blocks; i++) {
         size_t chunk = (i == need_blocks - 1) ? (fsize - i * BLOCKSIZE)
                                               : BLOCKSIZE;
         memset(buf, 0, BLOCKSIZE);
@@ -547,7 +544,7 @@ static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_pat
     ino.size       = (uint32_t)fsize;
     ino.linkCount  = 1;
     ino.isDirectory = 0;
-    for (uint32_t i = 0; i < need_blocks; ++i) ino.directPointers[i] = blk[i];
+    for (uint32_t i = 0; i < need_blocks; i++) ino.directPointers[i] = blk[i];
     write_inode(fp, ino_idx, &ino);
 
     /* link into parent dir */
@@ -561,11 +558,10 @@ static void cmd_ecpt(const char *img, const char *host_path, const char *vfs_pat
     sb.freeBlockCount -= need_blocks;
     store_super(fp);
     fclose(fp);
-    printf("ecpt: copied \"%s\" → \"%s\"\n", host_path, vfs_path);
+    printf("ecpt: copied \"%s\" -> \"%s\"\n", host_path, vfs_path);
 }
 
-/* ─── Helper: copy VFS file → host (external copy from) ────────────────────── */
-static void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
+void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -586,7 +582,7 @@ static void cmd_ecpf(const char *img, const char *vfs_path, const char *host_pat
 
     uint32_t blocks = (ino.size + BLOCKSIZE - 1) / BLOCKSIZE;
     uint8_t buf[BLOCKSIZE];
-    for (uint32_t i = 0; i < blocks; ++i) {
+    for (uint32_t i = 0; i < blocks; i++) {
         read_block(fp, ino.directPointers[i], buf);
         size_t chunk = (i == blocks - 1) ? (ino.size - i * BLOCKSIZE)
                                          : BLOCKSIZE;
@@ -594,11 +590,11 @@ static void cmd_ecpf(const char *img, const char *vfs_path, const char *host_pat
     }
     fclose(hf);
     fclose(fp);
-    printf("ecpf: copied \"%s\" → \"%s\"\n", vfs_path, host_path);
+    printf("ecpf: copied \"%s\" -> \"%s\"\n", vfs_path, host_path);
 }
 
 
-void init_disk(const char *filename, size_t disk_size)
+void cmd_mkfs(const char *filename, size_t disk_size)
 {
 
     uint64_t rounded_disk_size = (disk_size / BLOCKSIZE) * BLOCKSIZE;
@@ -688,25 +684,25 @@ void init_disk(const char *filename, size_t disk_size)
     fclose(fp);
 }
 
-static void cmd_lsdf(const char *img, const char *path);
-static void cmd_crhl(const char *img, const char *src, const char *dst);
-static void cmd_rm  (const char *img, const char *path);
-static void cmd_ext (const char *img, const char *path, uint32_t add);
-static void cmd_red (const char *img, const char *path, uint32_t sub);
+void cmd_lsdf(const char *img, const char *path);
+void cmd_crhl(const char *img, const char *src, const char *dst);
+void cmd_rm  (const char *img, const char *path);
+void cmd_ext (const char *img, const char *path, uint32_t add);
+void cmd_red (const char *img, const char *path, uint32_t sub);
 
 static uint64_t compute_usage(FILE *fp, uint32_t ino_idx);
 
-static void release_block(FILE *fp, uint32_t blk)
+void release_block(FILE *fp, uint32_t blk)
 {
     free_in_bitmap(fp, BLOCK_BITMAP_OFFSET, blk);
     sb.freeBlockCount++;
 }
 
-static void release_inode_and_data(FILE *fp, uint32_t ino_idx, Inode *ino)
+void release_inode_and_data(FILE *fp, uint32_t ino_idx, Inode *ino)
 {
     /* free payload blocks (direct only) */
     uint32_t blks = (ino->size + BLOCKSIZE - 1) / BLOCKSIZE;
-    for (uint32_t i = 0; i < blks; ++i)
+    for (uint32_t i = 0; i < blks; i++)
         if (ino->directPointers[i])
             release_block(fp, ino->directPointers[i]);
 
@@ -728,14 +724,14 @@ static uint64_t compute_usage(FILE *fp, uint32_t ino_idx)
     DirectoryEntry ent[DIRS_PER_BLOCK];
     read_block(fp, ino.directPointers[0], ent);
 
-    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
         if (ent[i].inodeIndex &&
             strcmp(ent[i].name, ".")  && strcmp(ent[i].name, ".."))
             total += compute_usage(fp, ent[i].inodeIndex);
     return total;
 }
 
-static void cmd_lsdf(const char *img, const char *path)
+void cmd_lsdf(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -755,7 +751,7 @@ static void cmd_lsdf(const char *img, const char *path)
 }
 
 
-static void cmd_crhl(const char *img, const char *src, const char *dst)
+void cmd_crhl(const char *img, const char *src, const char *dst)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -789,10 +785,10 @@ static void cmd_crhl(const char *img, const char *src, const char *dst)
     write_inode(fp, src_ino, &target);
 
     fclose(fp);
-    printf("crhl: linked %s → %s\n", dst, src);
+    printf("crhl: linked %s -> %s\n", dst, src);
 }
 
-static void cmd_rm(const char *img, const char *path)
+void cmd_rm(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -815,7 +811,7 @@ static void cmd_rm(const char *img, const char *path)
     read_block(fp, parent.directPointers[0], ent);
 
     bool removed = false;
-    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i)
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
         if (ent[i].inodeIndex == ino_idx &&
             strncmp(ent[i].name, leaf, MAX_FILENAME) == 0)
         {
@@ -842,7 +838,7 @@ static void cmd_rm(const char *img, const char *path)
     printf("rm: removed %s\n", path);
 }
 
-static void cmd_ext(const char *img, const char *path, uint32_t add)
+void cmd_ext(const char *img, const char *path, uint32_t add)
 {
     if (!add) return;
 
@@ -867,7 +863,7 @@ static void cmd_ext(const char *img, const char *path, uint32_t add)
         die("ext: exceeds max direct blocks (12)");
 
     /* allocate extra blocks if needed */
-    for (uint32_t i = old_blocks; i < new_blocks; ++i) {
+    for (uint32_t i = old_blocks; i < new_blocks; i++) {
         uint32_t b = alloc_block(fp);
         if (b == UINT32_MAX) die("ext: out of blocks");
         ino.directPointers[i] = b;
@@ -885,8 +881,7 @@ static void cmd_ext(const char *img, const char *path, uint32_t add)
            add, path, new_size);
 }
 
-/* ────  red – reduce a file by N bytes  ───────────────────────────────────── */
-static void cmd_red(const char *img, const char *path, uint32_t sub)
+void cmd_red(const char *img, const char *path, uint32_t sub)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
@@ -913,7 +908,7 @@ static void cmd_red(const char *img, const char *path, uint32_t sub)
     uint32_t new_blocks = (new_size + BLOCKSIZE - 1) / BLOCKSIZE;
 
     /* free surplus blocks */
-    for (uint32_t i = new_blocks; i < old_blocks; ++i)
+    for (uint32_t i = new_blocks; i < old_blocks; i++)
         if (ino.directPointers[i]) {
             release_block(fp, ino.directPointers[i]);
             ino.directPointers[i] = 0;
@@ -926,22 +921,69 @@ static void cmd_red(const char *img, const char *path, uint32_t sub)
     printf("red: %u bytes removed from %s (new size %u)\n",
            sub, path, new_size);
 }
+void du_walk(FILE *fp, uint32_t ino_idx, const char *path)
+{
+    /* print cumulative size of this object -------------------------------- */
+    uint64_t bytes = compute_usage(fp, ino_idx);
+    printf("%llu\t%s\n", (unsigned long long)bytes, path);
+
+    /* if it is a directory, recurse over its children --------------------- */
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
+    if (!ino.isDirectory)
+        return;                         /* regular file – nothing more to do */
+
+    DirectoryEntry ent[DIRS_PER_BLOCK];
+    read_block(fp, ino.directPointers[0], ent);
+
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
+        if (ent[i].inodeIndex &&
+            strcmp(ent[i].name, ".")  != 0 &&
+            strcmp(ent[i].name, "..") != 0)
+        {
+            char child_path[1024];
+            if (strcmp(path, "/") == 0)           /* avoid “//subdir” */
+                snprintf(child_path, sizeof(child_path), "/%s", ent[i].name);
+            else
+                snprintf(child_path, sizeof(child_path), "%s/%s",
+                         path, ent[i].name);
+
+            du_walk(fp, ent[i].inodeIndex, child_path);
+        }
+}
+
+void cmd_du(const char *img, const char *path)
+{
+    FILE *fp = open_image_rw(img);
+    load_super(fp);
+
+    /* resolve the starting inode ------------------------------------------ */
+    uint32_t parent_idx;
+    char     leaf[MAX_FILENAME];
+    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, leaf);
+    if (ino_idx == parent_idx)
+        die("du: path not found");
+
+    du_walk(fp, ino_idx, path);         /* depth-first walk + print */
+
+    fclose(fp);
+}
 
 void usage()
 {
     printf("Usage: vfs <imagepath> <command> [args]\n");
     printf("Commands:\n");
-    printf("\tmkfs <bytes>\t\t- create an empty image\n");
-    printf("\tmkdir <path>\t\t- create directory at path\n");
-    printf("\trmdir <path>\t\t- remove directory at path\n");
-    printf("\tls <path>\t\t- list items at path\n");
-    printf("\tdf\t\t- show disk usage of the image\n");
-    printf("\tlsdf <path>\t\t- show disk usage of the pathitem\n");
+    printf("\tmkfs <bytes>\t\t\t- create an empty image\n");
+    printf("\tmkdir <path>\t\t\t- create directory at path\n");
+    printf("\trmdir <path>\t\t\t- remove directory at path\n");
+    printf("\tls <path>\t\t\t- list items at path\n");
+    printf("\tdf\t\t\t\t- show disk usage of the image\n");
+    printf("\tlsdf <path>\t\t\t- show disk usage of the pathitem\n");
     printf("\tcrhl <path> <path>\t\t- create a hard link to file or dir\n");
-    printf("\trm <path>\t\t- remove a file or link\n");
-    printf("\text <path> <n>\t\t- add n bytes to a file\n");
-    printf("\tred <path> <n>\t\t- reduce n bytes from a file\n");
-    printf("\tdu <path>\t\t- display info about disk usage\n");
+    printf("\trm <path>\t\t\t- remove a file or link\n");
+    printf("\text <path> <n>\t\t\t- add n bytes to a file\n");
+    printf("\tred <path> <n>\t\t\t- reduce n bytes from a file\n");
+    printf("\tdu <path>\t\t\t- display info about disk usage\n");
 
     printf("\tecpt <ext_path> <path>\t\t- external copy to disk\n");
     printf("\tecpf <path> <ext_path>\t\t- external copy from disk\n");
@@ -965,7 +1007,7 @@ int main(int argc, char *argv[])
             usage();
             return 1;
         }
-        init_disk(img, strtoull(argv[3], NULL, 10));
+        cmd_mkfs(img, strtoull(argv[3], NULL, 10));
         return 0;
     }
     else if (strcmp(cmd, "mkdir") == 0)
@@ -1057,6 +1099,13 @@ int main(int argc, char *argv[])
         cmd_red(img, argv[3], (uint32_t)strtoul(argv[4], NULL, 10));
         return 0;
     }
+    else if (strcmp(cmd, "du") == 0)
+    {
+        if(argc != 4) { usage(); return 1; }
+        cmd_du(img, argv[3]);
+        return 0;
+    }
+
 
     usage();
     return 1;
