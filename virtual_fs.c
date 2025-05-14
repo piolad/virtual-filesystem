@@ -647,9 +647,11 @@ uint64_t compute_usage(FILE *fp, uint32_t ino_idx)
     Inode ino;
     read_inode(fp, ino_idx, &ino);
 
+    // if the inode is not a directory, return its size, rounded-up 
     if (!ino.isDirectory)
         return ((ino.size + BLOCKSIZE - 1) / BLOCKSIZE) * BLOCKSIZE;
 
+    // if inode is a directory -> 1 block for itself + all its children
     uint64_t total = BLOCKSIZE;
     DirectoryEntry ent[DIRS_PER_BLOCK];
     read_block(fp, ino.directPointers[0], ent);
