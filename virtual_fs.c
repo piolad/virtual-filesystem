@@ -208,82 +208,63 @@ int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
 // - if parent_out != null -> sets it as the parents inode
 // - if leaf_out != null -> sets it as the final component of path (file/dir name)
 // the return of upto 3 vars makes it efficient
-uint32_t path_lookup(FILE *fp,
-                            const char *path,
-                            uint32_t *parent_out,
-                            char *leaf_out)
+
+uint32_t path_lookup(FILE *fp, const char *path, uint32_t *parent_out, char *leaf_out)
 {
     if (!path || path[0] != '/')
         return UINT32_MAX;
 
-    if (path[1] == 0)
-    {
-        if (parent_out)
-            *parent_out = 0;
-        if (leaf_out)
-            strcpy(leaf_out, "/");
-        return 0; // root inode
+    // root
+    if (path[1] == 0) {
+        if (parent_out) *parent_out = 0;
+        if (leaf_out)   strcpy(leaf_out, "/");
+        return 0;
     }
 
-    char tmp[BLOCKSIZE];
-    strncpy(tmp, path, sizeof(tmp));
-    tmp[sizeof(tmp) - 1] = '\0';
+    char copy[1024];
+    strncpy(copy, path + 1, sizeof copy); // skip first /
+    copy[sizeof copy - 1] = '\0';
 
-    uint32_t cur_idx = 0; 
-    Inode cur;
+    uint32_t cur_idx = 0; // root inode
+    Inode     cur;
     read_inode(fp, cur_idx, &cur);
 
-    char *saveptr = NULL;
-    char *tok = strtok_r(tmp, "/", &saveptr);
-    char *next_tok = strtok_r(NULL, "/", &saveptr);
-    uint8_t *blk_buf = malloc(BLOCKSIZE);
+    char *save = NULL;
+    char *tok  = strtok_r(copy, "/", &save);
+    char buf[BLOCKSIZE];
+
     DirectoryEntry child;
-    while (tok)
-    {
-        bool last = (next_tok == NULL);
 
-        read_block(fp, cur.directPointers[0], blk_buf);
+    while (tok) {
+        bool last = (save == NULL || *save == '\0');
 
-        int found = find_entry_in_block((DirectoryEntry *)blk_buf, tok, &child);
+        read_block(fp, cur.directPointers[0], buf);
+        int found = find_entry_in_block((DirectoryEntry *)buf, tok, &child);
 
-        if (!last)
-        {
-            if (found != 0){
-                free(blk_buf); 
-                return UINT32_MAX;
-            }
+        if (!last) {
+            if (found != 0)
+                return UINT32_MAX; // not found
+
             read_inode(fp, child.inodeIndex, &cur);
-            if (!cur.isDirectory) {
-                free(blk_buf); 
-                return UINT32_MAX;
-            }
-                
-            cur_idx = child.inodeIndex; 
-        }
-        else
-        {
 
-            if (parent_out)
-                *parent_out = cur_idx;
-            if (leaf_out&& tok)
-            {
-                size_t len = strnlen(tok, MAX_FILENAME - 1);
-                strncpy(leaf_out, tok, len);
-                leaf_out[len] = '\0';
-            }
-            
-            free(blk_buf); 
-            if (found == 0)
-                return child.inodeIndex;
-            else                
-                return cur_idx; 
+            if (!cur.isDirectory)
+                return UINT32_MAX; // not a directory
+
+            cur_idx = child.inodeIndex; // next index
+            tok = strtok_r(NULL, "/", &save); // next token
+            continue;
         }
-        tok = next_tok;
-        next_tok = strtok_r(NULL, "/", &saveptr);
+        if (parent_out)
+            *parent_out = cur_idx;
+        if (leaf_out) {
+            strncpy(leaf_out, tok, MAX_FILENAME - 1);
+            leaf_out[MAX_FILENAME - 1] = '\0';
+        }
+
+        return (found == 0) ? child.inodeIndex : cur_idx;
     }
 
-    free(blk_buf); 
-    return UINT32_MAX;
+    return UINT32_MAX; //should not reach here
 }
 
 void cmd_mkdir(const char *img, const char *path)
