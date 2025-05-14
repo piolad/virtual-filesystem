@@ -80,14 +80,14 @@ FILE *open_image_rw(const char *path)
 
 void read_at(FILE *fp, uint64_t off, void *buf, size_t n)
 {
-    if (fseeko(fp, off, SEEK_SET) || fread(buf, 1, n, fp) != n)
+    if (fseek(fp, off, SEEK_SET) || fread(buf, 1, n, fp) != n)
         die("read_at");
         
 }
 
 void write_at(FILE *fp, uint64_t off, const void *buf, size_t n)
 {
-    if (fseeko(fp, off, SEEK_SET) || fwrite(buf, 1, n, fp) != n)
+    if (fseek(fp, off, SEEK_SET) || fwrite(buf, 1, n, fp) != n)
         die("write_at");
 }
 
@@ -351,7 +351,7 @@ void cmd_ls(const char *img, const char *path)
     DirectoryEntry dir[DIRS_PER_BLOCK];
     read_block(fp, ino.directPointers[0], dir);
 
-    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i) {
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++) {
         if (!dir[i].inodeIndex) continue;
 
         Inode child;
@@ -381,66 +381,56 @@ void cmd_df(const char *img)
     fclose(fp);
 }
 
-
 void cmd_rmdir(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
     uint32_t parent_idx;
-    char name[MAX_FILENAME];
-    uint32_t target_ino_idx = path_lookup(fp, path, &parent_idx, name);
+    char leaf[MAX_FILENAME];
+    uint32_t dir_idx = path_lookup(fp, path, &parent_idx, leaf);
 
-    if (target_ino_idx == UINT32_MAX)
+    if (dir_idx == UINT32_MAX || dir_idx == parent_idx)
         die("rmdir: directory not found");
 
-    Inode target_ino;
-    read_inode(fp, target_ino_idx, &target_ino);
-
-    if (!target_ino.isDirectory)
+    Inode dir_ino;
+    read_inode(fp, dir_idx, &dir_ino);
+    if (!dir_ino.isDirectory)
         die("rmdir: not a directory");
 
-    // Read the directory block to ensure it's empty
-    DirectoryEntry entries[DIRS_PER_BLOCK];
-    read_block(fp, target_ino.directPointers[0], entries);
+    DirectoryEntry ents[DIRS_PER_BLOCK];
+    read_block(fp, dir_ino.directPointers[0], ents);
 
-    int entry_count = 0;
     for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
-    {
-        if (entries[i].inodeIndex != 0)
-        {
-            if (strcmp(entries[i].name, ".") != 0 && strcmp(entries[i].name, "..") != 0)
-                die("rmdir: directory not empty");
-            entry_count++;
-        }
-    }
+        if (ents[i].inodeIndex &&
+            strcmp(ents[i].name, ".")  && strcmp(ents[i].name, ".."))
+            die("rmdir: directory not empty");
 
-    if (entry_count <= 0)
-        die("rmdir: corrupted directory");
-
-    // Remove the directory entry from the parent
     Inode parent_ino;
     read_inode(fp, parent_idx, &parent_ino);
-    DirectoryEntry parent_entries[DIRS_PER_BLOCK];
-    read_block(fp, parent_ino.directPointers[0], parent_entries);
+    read_block(fp, parent_ino.directPointers[0], ents);
 
-    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++)
-    {
-        if (parent_entries[i].inodeIndex == target_ino_idx &&
-            strncmp(parent_entries[i].name, name, MAX_FILENAME) == 0)
-        {
-            parent_entries[i].inodeIndex = 0;
-            parent_entries[i].name[0] = '\0';
+    bool removed = false;
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; i++){
+
+        if (ents[i].inodeIndex == dir_idx && strncmp(ents[i].name, leaf, MAX_FILENAME) == 0){
+
+            ents[i].inodeIndex = 0;
+            ents[i].name[0] = '\0';
             parent_ino.size -= sizeof(DirectoryEntry);
-            write_block(fp, parent_ino.directPointers[0], parent_entries);
-            write_inode(fp, parent_idx, &parent_ino);
+            removed = true;
+
             break;
         }
     }
+    if (!removed)
+        die("rmdir: corrupted directory");
 
-    // Free inode and block
-    free_in_bitmap(fp, INODE_BITMAP_OFFSET, target_ino_idx);
-    free_in_bitmap(fp, BLOCK_BITMAP_OFFSET, target_ino.directPointers[0]);
+    write_block(fp, parent_ino.directPointers[0], ents);
+    write_inode(fp, parent_idx, &parent_ino);
+
+    free_in_bitmap(fp, INODE_BITMAP_OFFSET,  dir_idx);
+    free_in_bitmap(fp, BLOCK_BITMAP_OFFSET, dir_ino.directPointers[0]);
 
     sb.freeInodeCount++;
     sb.freeBlockCount++;
@@ -458,8 +448,10 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
     FILE *hf = fopen(host_path, "rb");
     if (!hf) die("ecpt: open host file");
 
-    if (fseeko(hf, 0, SEEK_END)) die("ecpt: ftell");
-    uint64_t fsize = ftello(hf);
+    //get file size
+    if (fseek(hf, 0, SEEK_END))
+        die("ecpt: ftell");
+    uint64_t fsize = ftell(hf);
     rewind(hf);
 
     if (fsize > DIRECTBLOCK_CNT * BLOCKSIZE)
@@ -484,8 +476,11 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
 
     uint8_t buf[BLOCKSIZE] = {0};
     for (uint32_t i = 0; i < need_blocks; i++) {
+
+        // read the file in chunks of upto BLOCKSIZE
         size_t chunk = (i == need_blocks - 1) ? (fsize - i * BLOCKSIZE) : BLOCKSIZE;
-        memset(buf, 0, BLOCKSIZE);
+        memset(buf, 0, BLOCKSIZE); // clear the buffer
+
         fread(buf, 1, chunk, hf);
         write_block(fp, blk[i], buf);
     }
@@ -539,7 +534,6 @@ void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
     fclose(fp);
     printf("ecpf: copied \"%s\" -> \"%s\"\n", vfs_path, host_path);
 }
-
 
 void cmd_mkfs(const char *filename, size_t disk_size)
 {
@@ -630,8 +624,6 @@ void cmd_mkfs(const char *filename, size_t disk_size)
     fflush(fp);
     fclose(fp);
 }
-
-uint64_t compute_usage(FILE *fp, uint32_t ino_idx);
 
 void release_block(FILE *fp, uint32_t blk)
 {
