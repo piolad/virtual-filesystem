@@ -208,7 +208,6 @@ int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
 // - if parent_out != null -> sets it as the parents inode
 // - if leaf_out != null -> sets it as the final component of path (file/dir name)
 // the return of upto 3 vars makes it efficient
-
 uint32_t path_lookup(FILE *fp, const char *path, uint32_t *parent_out, char *leaf_out)
 {
     if (!path || path[0] != '/')
@@ -287,6 +286,8 @@ void cmd_mkdir(const char *img, const char *path)
     if (find_entry_in_block(blk, name, NULL) == 0)
         die("mkdir: already exists");
 
+
+    // check if the parent directory has space for a new entry
     uint32_t new_ino_idx = alloc_inode(fp);
     if (new_ino_idx == UINT32_MAX)
         die("no free inodes");
@@ -321,74 +322,47 @@ void cmd_mkdir(const char *img, const char *path)
     fclose(fp);
     printf("mkdir: created %s\n", path);
 }
+
 void cmd_ls(const char *img, const char *path)
 {
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
-    uint32_t parent_idx = path_lookup(fp, path, NULL, NULL);
-    uint32_t inode_idx;
+    // find the inode of the path
+    uint32_t parent_idx;
+    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, NULL);
 
-    if (strcmp(path, "/") == 0)
-    {
-        inode_idx = 0;
-    }
-    else
-    {
+    // if the path is the root, set parent_idx to 0
+    if (ino_idx == UINT32_MAX ||
+        (strcmp(path, "/") != 0 && ino_idx == parent_idx))
+        die("ls: not found");
 
-        DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
-        Inode tmp = {0};
-        read_inode(fp, parent_idx, &tmp);
-        read_block(fp, ((Inode){0}).directPointers[0], blk); 
-    }
+    Inode ino;
+    read_inode(fp, ino_idx, &ino);
 
-    inode_idx = 0;
-    Inode cur;
-    read_inode(fp, inode_idx, &cur);
-
-    if (strcmp(path, "/") != 0)
-    {
-        char tmp[1024];
-        strncpy(tmp, path, sizeof tmp);
-        char *saveptr = NULL, *tok = strtok_r(tmp, "/", &saveptr);
-        while (tok)
-        {
-            DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
-            read_block(fp, cur.directPointers[0], blk);
-
-            if (find_entry_in_block(blk, tok, &(DirectoryEntry){0}) < 0)
-                die("ls: not found");
-
-            DirectoryEntry child;
-            find_entry_in_block(blk, tok, &child);
-            inode_idx = child.inodeIndex;
-            read_inode(fp, inode_idx, &cur);
-            tok = strtok_r(NULL, "/", &saveptr);
-        }
+    // if path is file -> print its size
+    if (!ino.isDirectory) {
+        printf("%s  %u bytes\n", path, ino.size);
+        fclose(fp);
+        return;
     }
 
-    if (cur.isDirectory)
-    {
-        DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
-        read_block(fp, cur.directPointers[0], blk);
+    
+    DirectoryEntry dir[DIRS_PER_BLOCK];
+    read_block(fp, ino.directPointers[0], dir);
 
-        for (uint32_t i = 0; i < BLOCKSIZE / sizeof(DirectoryEntry); i++)
-        {
-            if (blk[i].inodeIndex)
-            {
-                Inode tmp;
-                read_inode(fp, blk[i].inodeIndex, &tmp);
-                printf("%-30s %10u  %s\n",
-                       blk[i].name,
-                       tmp.size,
-                       tmp.isDirectory ? "<DIR>" : "");
-            }
-        }
+    for (uint32_t i = 0; i < DIRS_PER_BLOCK; ++i) {
+        if (!dir[i].inodeIndex) continue;
+
+        Inode child;
+        read_inode(fp, dir[i].inodeIndex, &child);
+
+        printf("%-30s %10u  %s\n",
+               dir[i].name,
+               child.size,
+               child.isDirectory ? "<DIR>" : "");
     }
-    else
-    {
-        printf("%s  %u bytes\n", path, cur.size);
-    }
+
     fclose(fp);
 }
 
