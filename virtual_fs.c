@@ -32,17 +32,17 @@ typedef struct
     uint32_t totalInodeCount;
     uint32_t freeInodeCount;
     uint32_t freeBlockCount;
-    uint32_t blockSize;
+    uint32_t blockSize; // for compatibility
     uint32_t dataStartOffset;
 } SuperBlock;
 
 typedef struct
 {
     uint32_t size; // in bytes
-    uint32_t directPointers[DIRECTBLOCK_CNT];
+    uint32_t directPointers[DIRECTBLOCK_CNT]; // to data blocks
     uint32_t linkCount;
     uint32_t isDirectory; // 0 - file, 1 -dir
-    uint8_t padding[4];
+    uint8_t padding[4]; // make struct 64 bytes
 
 } Inode;
 typedef struct
@@ -62,8 +62,7 @@ typedef struct
 } BlockGroupDesc;
 #pragma pack(pop)
 
-uint8_t buf[BLOCKSIZE];
-SuperBlock sb;
+SuperBlock sb; //static for simplicity
 
 void die(const char *msg)
 {
@@ -92,6 +91,7 @@ void write_at(FILE *fp, uint64_t off, const void *buf, size_t n)
         die("write_at");
 }
 
+// superblock
 void load_super(FILE *fp)
 {
     read_at(fp, 0, &sb, sizeof sb);
@@ -132,7 +132,7 @@ uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off)
     {
         uint64_t off = bmp_off + i / 8;
         read_at(fp, off, &byte, 1);
-        if (!(byte & (1 << (i & 7))))
+        if (!(byte & (1 << (i & 7)))) //free bit
         {
             byte |= 1 << (i & 7);
             write_at(fp, off, &byte, 1);
@@ -145,9 +145,9 @@ uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off)
 void free_in_bitmap(FILE *fp, uint64_t bmp_off, uint32_t idx)
 {
     uint8_t byte;
-    uint64_t off = bmp_off + idx / 8;
+    uint64_t off = bmp_off + idx / 8; // find the byte
     read_at(fp, off, &byte, 1);
-    byte &= ~(1 << (idx & 7));
+    byte &= ~(1 << (idx & 7)); // clear the bit
     write_at(fp, off, &byte, 1);
 }
 
@@ -155,10 +155,13 @@ void free_in_bitmap(FILE *fp, uint64_t bmp_off, uint32_t idx)
 uint32_t alloc_block(FILE *fp) { return alloc_from_bitmap(fp, BLOCK_BITMAP_OFFSET); }
 uint32_t alloc_inode(FILE *fp) { return alloc_from_bitmap(fp, INODE_BITMAP_OFFSET); }
 
+
+// find the entry by name inside block of DirectoryEntrys
+// returns 0 if found, -1 if not found
+// and if out != null -> sets it as the found entry
 int find_entry_in_block(DirectoryEntry *block,
                                char *name,
-                               DirectoryEntry *out,
-                               uint32_t *out_pos)
+                               DirectoryEntry *out)
 {
     for (uint32_t i = 0; i < BLOCKSIZE / sizeof(DirectoryEntry); i++)
     {
@@ -166,8 +169,6 @@ int find_entry_in_block(DirectoryEntry *block,
         {
             if (out)
                 *out = block[i];
-            if (out_pos)
-                *out_pos = i;
             return 0;
         }
     }
@@ -224,7 +225,7 @@ uint32_t path_lookup(FILE *fp,
         return 0; // root inode
     }
 
-    char tmp[1024];
+    char tmp[BLOCKSIZE];
     strncpy(tmp, path, sizeof(tmp));
     tmp[sizeof(tmp) - 1] = '\0';
 
@@ -243,8 +244,7 @@ uint32_t path_lookup(FILE *fp,
 
         read_block(fp, cur.directPointers[0], blk_buf);
 
-        int found = find_entry_in_block((DirectoryEntry *)blk_buf,
-                                        tok, &child, NULL);
+        int found = find_entry_in_block((DirectoryEntry *)blk_buf, tok, &child);
 
         if (!last)
         {
@@ -303,7 +303,7 @@ void cmd_mkdir(const char *img, const char *path)
 
     DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
     read_block(fp, parent.directPointers[0], blk);
-    if (find_entry_in_block(blk, name, NULL, NULL) == 0)
+    if (find_entry_in_block(blk, name, NULL) == 0)
         die("mkdir: already exists");
 
     uint32_t new_ino_idx = alloc_inode(fp);
@@ -345,11 +345,7 @@ void cmd_ls(const char *img, const char *path)
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
-    uint32_t dummy_parent;
-    char dummy_leaf[MAX_FILENAME];
-    uint32_t parent_idx = path_lookup(fp, path, &dummy_parent, dummy_leaf);
-
-
+    uint32_t parent_idx = path_lookup(fp, path, NULL, NULL);
     uint32_t inode_idx;
 
     if (strcmp(path, "/") == 0)
@@ -379,11 +375,11 @@ void cmd_ls(const char *img, const char *path)
             DirectoryEntry blk[BLOCKSIZE / sizeof(DirectoryEntry)];
             read_block(fp, cur.directPointers[0], blk);
 
-            if (find_entry_in_block(blk, tok, &(DirectoryEntry){0}, NULL) < 0)
+            if (find_entry_in_block(blk, tok, &(DirectoryEntry){0}) < 0)
                 die("ls: not found");
 
             DirectoryEntry child;
-            find_entry_in_block(blk, tok, &child, NULL);
+            find_entry_in_block(blk, tok, &child);
             inode_idx = child.inodeIndex;
             read_inode(fp, inode_idx, &cur);
             tok = strtok_r(NULL, "/", &saveptr);
@@ -533,8 +529,7 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
 
     uint8_t buf[BLOCKSIZE] = {0};
     for (uint32_t i = 0; i < need_blocks; i++) {
-        size_t chunk = (i == need_blocks - 1) ? (fsize - i * BLOCKSIZE)
-                                              : BLOCKSIZE;
+        size_t chunk = (i == need_blocks - 1) ? (fsize - i * BLOCKSIZE) : BLOCKSIZE;
         memset(buf, 0, BLOCKSIZE);
         fread(buf, 1, chunk, hf);
         write_block(fp, blk[i], buf);
@@ -566,8 +561,7 @@ void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
     load_super(fp);
 
     uint32_t parent_idx;
-    char leaf[MAX_FILENAME];
-    uint32_t ino_idx = path_lookup(fp, vfs_path, &parent_idx, leaf);
+    uint32_t ino_idx = path_lookup(fp, vfs_path, &parent_idx, NULL);
     if (ino_idx == parent_idx)
         die("ecpf: source not found");
 
@@ -583,8 +577,7 @@ void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
     uint8_t buf[BLOCKSIZE];
     for (uint32_t i = 0; i < blocks; i++) {
         read_block(fp, ino.directPointers[i], buf);
-        size_t chunk = (i == blocks - 1) ? (ino.size - i * BLOCKSIZE)
-                                         : BLOCKSIZE;
+        size_t chunk = (i == blocks - 1) ? (ino.size - i * BLOCKSIZE) : BLOCKSIZE;
         fwrite(buf, 1, chunk, hf);
     }
     fclose(hf);
@@ -727,8 +720,7 @@ void cmd_lsdf(const char *img, const char *path)
     load_super(fp);
 
     uint32_t parent_idx;
-    char leaf[MAX_FILENAME];
-    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, leaf);
+    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, NULL);
     if (ino_idx == parent_idx)
         die("lsdf: path not found");
 
@@ -747,13 +739,12 @@ void cmd_crhl(const char *img, const char *src, const char *dst)
     load_super(fp);
 
     uint32_t src_parent;
-    char     src_leaf[MAX_FILENAME];
-    uint32_t src_ino = path_lookup(fp, src, &src_parent, src_leaf);
+    uint32_t src_ino = path_lookup(fp, src, &src_parent, NULL);
     if (src_ino == src_parent)
         die("crhl: source not found");
 
     uint32_t dst_parent;
-    char     dst_leaf[MAX_FILENAME];
+    char dst_leaf[MAX_FILENAME];
     uint32_t dst_found = path_lookup(fp, dst, &dst_parent, dst_leaf);
     if (dst_found != dst_parent)
         die("crhl: destination already exists");
@@ -810,7 +801,7 @@ void cmd_rm(const char *img, const char *path)
 
     write_block(fp, parent.directPointers[0], ent);
     write_inode (fp, parent_idx, &parent);
-    
+
     ino.linkCount--;
     if (ino.linkCount == 0)
         release_inode_and_data(fp, ino_idx, &ino);
@@ -830,8 +821,7 @@ void cmd_ext(const char *img, const char *path, uint32_t add)
     load_super(fp);
 
     uint32_t pidx;
-    char leaf[MAX_FILENAME];
-    uint32_t ino_idx = path_lookup(fp, path, &pidx, leaf);
+    uint32_t ino_idx = path_lookup(fp, path, &pidx, NULL);
     if (ino_idx == pidx) die("ext: path not found");
 
     Inode ino;
@@ -869,8 +859,7 @@ void cmd_red(const char *img, const char *path, uint32_t sub)
     load_super(fp);
 
     uint32_t pidx;
-    char leaf[MAX_FILENAME];
-    uint32_t ino_idx = path_lookup(fp, path, &pidx, leaf);
+    uint32_t ino_idx = path_lookup(fp, path, &pidx, NULL);
     if (ino_idx == pidx) die("red: path not found");
 
     Inode ino;
@@ -937,8 +926,7 @@ void cmd_du(const char *img, const char *path)
     load_super(fp);
 
     uint32_t parent_idx;
-    char     leaf[MAX_FILENAME];
-    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, leaf);
+    uint32_t ino_idx = path_lookup(fp, path, &parent_idx, NULL);
     if (ino_idx == parent_idx)
         die("du: path not found");
 
