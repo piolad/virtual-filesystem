@@ -63,7 +63,7 @@ typedef struct
 #pragma pack(pop)
 
 uint8_t buf[BLOCKSIZE];
-static SuperBlock sb;
+SuperBlock sb;
 
 void die(const char *msg)
 {
@@ -71,7 +71,7 @@ void die(const char *msg)
     exit(EXIT_FAILURE);
 }
 
-static FILE *open_image_rw(const char *path)
+FILE *open_image_rw(const char *path)
 {
     FILE *fp = fopen(path, "r+b");
     if (!fp)
@@ -125,7 +125,7 @@ void write_block(FILE *fp, uint32_t blk_no, const void *buf)
 }
 
 // find first free bit in bitmap and allocate
-static uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off)
+uint32_t alloc_from_bitmap(FILE *fp, uint64_t bmp_off)
 {
     uint8_t byte;
     for (uint32_t i = 0; i < sb.totalBlockCount; i++)
@@ -152,10 +152,10 @@ void free_in_bitmap(FILE *fp, uint64_t bmp_off, uint32_t idx)
 }
 
 // allocation of a block and an inode look same from bitmap perspetive - just at different offset
-static uint32_t alloc_block(FILE *fp) { return alloc_from_bitmap(fp, BLOCK_BITMAP_OFFSET); }
-static uint32_t alloc_inode(FILE *fp) { return alloc_from_bitmap(fp, INODE_BITMAP_OFFSET); }
+uint32_t alloc_block(FILE *fp) { return alloc_from_bitmap(fp, BLOCK_BITMAP_OFFSET); }
+uint32_t alloc_inode(FILE *fp) { return alloc_from_bitmap(fp, INODE_BITMAP_OFFSET); }
 
-static int find_entry_in_block(DirectoryEntry *block,
+int find_entry_in_block(DirectoryEntry *block,
                                char *name,
                                DirectoryEntry *out,
                                uint32_t *out_pos)
@@ -174,7 +174,7 @@ static int find_entry_in_block(DirectoryEntry *block,
     return -1; // not found
 }
 
-static int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
+int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
                             const char *name, uint32_t inodeNo)
 {
     uint8_t buf[BLOCKSIZE] = {0};
@@ -201,7 +201,7 @@ static int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
     return -1;
 }
 
-static uint32_t path_lookup(FILE *fp,
+uint32_t path_lookup(FILE *fp,
                             const char *path,
                             uint32_t *parent_out,
                             char *leaf_out)
@@ -690,7 +690,7 @@ void cmd_rm  (const char *img, const char *path);
 void cmd_ext (const char *img, const char *path, uint32_t add);
 void cmd_red (const char *img, const char *path, uint32_t sub);
 
-static uint64_t compute_usage(FILE *fp, uint32_t ino_idx);
+uint64_t compute_usage(FILE *fp, uint32_t ino_idx);
 
 void release_block(FILE *fp, uint32_t blk)
 {
@@ -711,7 +711,7 @@ void release_inode_and_data(FILE *fp, uint32_t ino_idx, Inode *ino)
     sb.freeInodeCount++;
 }
 
-static uint64_t compute_usage(FILE *fp, uint32_t ino_idx)
+uint64_t compute_usage(FILE *fp, uint32_t ino_idx)
 {
     Inode ino;
     read_inode(fp, ino_idx, &ino);

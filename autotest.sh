@@ -10,7 +10,6 @@ BLOCKSIZE=1024
 PASS=0
 FAIL=0
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 print_result () {
     local rc=$1 want=$3 msg=$2
     if [[ $rc -eq $want ]]; then
@@ -29,11 +28,12 @@ df_field () {               # usage: df_field "string" "Free Blocks:"
     printf '%s\n' "$1" | awk -v k="$2" '$0~k{print $(NF)}'
 }
 
-lsdf_bytes () {              # usage: lsdf_bytes "/file"
+lsdf_bytes () {
     local out
     out=$("$VFS_EXEC" "$IMAGE" lsdf "$1" 2>/dev/null) || return 1
-    printf '%s\n' "$out" | awk -F'[: ]+' '{print $(NF-7)}'
+    printf '%s\n' "$out" | sed -E 's/.*: ([0-9]+) bytes.*/\1/'
 }
+
 
 # numerical compare wrapper (print_result compatible)
 num_expect () {
@@ -52,14 +52,18 @@ cleanup
 "$VFS_EXEC" "$IMAGE" mkfs "$DISK_SIZE"
 print_result $? 'mkfs creates image' 0
 
-# ── basic df ────────────────────────────────────────────────────────────────
+###############################################################################
+# df
+###############################################################################
 df1="$("$VFS_EXEC" "$IMAGE" df)"
 tb=$(df_field "$df1" 'Total Blocks:'); fb1=$(df_field "$df1" 'Free Blocks:')
 ui1=$(df_field "$df1" 'Free Inodes:')
 num_expect "$tb"  -gt 0 'df shows total blocks'
 num_expect "$fb1" -gt 0 'df shows free blocks'
 
-# ── mkdir / rmdir  ──────────────────────────────────────────────────────────
+###############################################################################
+# mkdir
+###############################################################################
 "$VFS_EXEC" "$IMAGE" mkdir /dirA      >/dev/null 2>&1
 print_result $? 'mkdir /dirA' 0
 "$VFS_EXEC" "$IMAGE" mkdir /dirA/sub  >/dev/null 2>&1
