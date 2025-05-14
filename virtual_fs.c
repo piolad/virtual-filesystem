@@ -201,6 +201,12 @@ int add_entry_to_dir(FILE *fp, Inode *parent, uint32_t parent_idx,
     return -1;
 }
 
+// returns inode's index of the component if found
+// or UINT32_MAX if not found
+// also:
+// - if parent_out != null -> sets it as the parents inode
+// - if leaf_out != null -> sets it as the final component of path (file/dir name)
+// the return of upto 3 vars makes it efficient
 uint32_t path_lookup(FILE *fp,
                             const char *path,
                             uint32_t *parent_out,
@@ -215,7 +221,7 @@ uint32_t path_lookup(FILE *fp,
             *parent_out = 0;
         if (leaf_out)
             strcpy(leaf_out, "/");
-        return 0; /* root inode */
+        return 0; // root inode
     }
 
     char tmp[1024];
@@ -498,7 +504,6 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
-    /* open & size host file */
     FILE *hf = fopen(host_path, "rb");
     if (!hf) die("ecpt: open host file");
 
@@ -509,14 +514,12 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
     if (fsize > DIRECTBLOCK_CNT * BLOCKSIZE)
         die("ecpt: file too large for this FS (max 12 KiB)");
 
-    /* resolve destination */
     uint32_t parent_idx;
     char leaf[MAX_FILENAME];
     uint32_t found = path_lookup(fp, vfs_path, &parent_idx, leaf);
-    if (found != parent_idx)           /* already exists */
+    if (found != parent_idx)
         die("ecpt: destination already exists");
 
-    /* allocate inode + blocks */
     uint32_t ino_idx = alloc_inode(fp);
     if (ino_idx == UINT32_MAX) die("ecpt: no free inodes");
 
@@ -528,7 +531,6 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
         if ((blk[i] = alloc_block(fp)) == UINT32_MAX)
             die("ecpt: alloc_block");
 
-    /* write payload */
     uint8_t buf[BLOCKSIZE] = {0};
     for (uint32_t i = 0; i < need_blocks; i++) {
         size_t chunk = (i == need_blocks - 1) ? (fsize - i * BLOCKSIZE)
@@ -539,7 +541,6 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
     }
     fclose(hf);
 
-    /* create inode */
     Inode ino = {0};
     ino.size       = (uint32_t)fsize;
     ino.linkCount  = 1;
@@ -547,13 +548,11 @@ void cmd_ecpt(const char *img, const char *host_path, const char *vfs_path)
     for (uint32_t i = 0; i < need_blocks; i++) ino.directPointers[i] = blk[i];
     write_inode(fp, ino_idx, &ino);
 
-    /* link into parent dir */
     Inode parent;
     read_inode(fp, parent_idx, &parent);
     if (add_entry_to_dir(fp, &parent, parent_idx, leaf, ino_idx) < 0)
         die("ecpt: parent directory full");
 
-    /* bookkeeping */
     sb.freeInodeCount--;
     sb.freeBlockCount -= need_blocks;
     store_super(fp);
@@ -684,12 +683,6 @@ void cmd_mkfs(const char *filename, size_t disk_size)
     fclose(fp);
 }
 
-void cmd_lsdf(const char *img, const char *path);
-void cmd_crhl(const char *img, const char *src, const char *dst);
-void cmd_rm  (const char *img, const char *path);
-void cmd_ext (const char *img, const char *path, uint32_t add);
-void cmd_red (const char *img, const char *path, uint32_t sub);
-
 uint64_t compute_usage(FILE *fp, uint32_t ino_idx);
 
 void release_block(FILE *fp, uint32_t blk)
@@ -700,13 +693,11 @@ void release_block(FILE *fp, uint32_t blk)
 
 void release_inode_and_data(FILE *fp, uint32_t ino_idx, Inode *ino)
 {
-    /* free payload blocks (direct only) */
     uint32_t blks = (ino->size + BLOCKSIZE - 1) / BLOCKSIZE;
     for (uint32_t i = 0; i < blks; i++)
         if (ino->directPointers[i])
             release_block(fp, ino->directPointers[i]);
 
-    /* release inode itself */
     free_in_bitmap(fp, INODE_BITMAP_OFFSET, ino_idx);
     sb.freeInodeCount++;
 }
@@ -716,10 +707,9 @@ uint64_t compute_usage(FILE *fp, uint32_t ino_idx)
     Inode ino;
     read_inode(fp, ino_idx, &ino);
 
-    if (!ino.isDirectory)      /* regular file */
+    if (!ino.isDirectory)
         return ((ino.size + BLOCKSIZE - 1) / BLOCKSIZE) * BLOCKSIZE;
 
-    /* directory: own 1 block + children */
     uint64_t total = BLOCKSIZE;
     DirectoryEntry ent[DIRS_PER_BLOCK];
     read_block(fp, ino.directPointers[0], ent);
@@ -756,21 +746,18 @@ void cmd_crhl(const char *img, const char *src, const char *dst)
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
-    /* resolve source */
     uint32_t src_parent;
     char     src_leaf[MAX_FILENAME];
     uint32_t src_ino = path_lookup(fp, src, &src_parent, src_leaf);
     if (src_ino == src_parent)
         die("crhl: source not found");
 
-    /* resolve (non-existing) destination */
     uint32_t dst_parent;
     char     dst_leaf[MAX_FILENAME];
     uint32_t dst_found = path_lookup(fp, dst, &dst_parent, dst_leaf);
     if (dst_found != dst_parent)
         die("crhl: destination already exists");
 
-    /* add entry into destination directory */
     Inode parent;
     read_inode(fp, dst_parent, &parent);
     if (!parent.isDirectory) die("crhl: dest-parent not a directory");
@@ -778,7 +765,6 @@ void cmd_crhl(const char *img, const char *src, const char *dst)
     if (add_entry_to_dir(fp, &parent, dst_parent, dst_leaf, src_ino) < 0)
         die("crhl: parent directory full");
 
-    /* bump link-count */
     Inode target;
     read_inode(fp, src_ino, &target);
     target.linkCount++;
@@ -804,7 +790,6 @@ void cmd_rm(const char *img, const char *path)
     if (ino.isDirectory)
         die("rm: use rmdir for directories");
 
-    /* remove entry from parent dir */
     Inode parent;
     read_inode(fp, parent_idx, &parent);
     DirectoryEntry ent[DIRS_PER_BLOCK];
@@ -825,8 +810,7 @@ void cmd_rm(const char *img, const char *path)
 
     write_block(fp, parent.directPointers[0], ent);
     write_inode (fp, parent_idx, &parent);
-
-    /* decrement link count + possibly free */
+    
     ino.linkCount--;
     if (ino.linkCount == 0)
         release_inode_and_data(fp, ino_idx, &ino);
@@ -862,13 +846,11 @@ void cmd_ext(const char *img, const char *path, uint32_t add)
     if (new_blocks > DIRECTBLOCK_CNT)
         die("ext: exceeds max direct blocks (12)");
 
-    /* allocate extra blocks if needed */
     for (uint32_t i = old_blocks; i < new_blocks; i++) {
         uint32_t b = alloc_block(fp);
         if (b == UINT32_MAX) die("ext: out of blocks");
         ino.directPointers[i] = b;
         sb.freeBlockCount--;
-        /* zero-fill new block */
         uint8_t z[BLOCKSIZE]={0};
         write_block(fp, b, z);
     }
@@ -895,7 +877,7 @@ void cmd_red(const char *img, const char *path, uint32_t sub)
     read_inode(fp, ino_idx, &ino);
     if (ino.isDirectory) die("red: cannot shrink a directory");
 
-    if (sub >= ino.size) {            /* truncate to empty */
+    if (sub >= ino.size) {
         release_inode_and_data(fp, ino_idx, &ino);
         store_super(fp);
         fclose(fp);
@@ -907,7 +889,6 @@ void cmd_red(const char *img, const char *path, uint32_t sub)
     uint32_t old_blocks = (ino.size + BLOCKSIZE - 1) / BLOCKSIZE;
     uint32_t new_blocks = (new_size + BLOCKSIZE - 1) / BLOCKSIZE;
 
-    /* free surplus blocks */
     for (uint32_t i = new_blocks; i < old_blocks; i++)
         if (ino.directPointers[i]) {
             release_block(fp, ino.directPointers[i]);
@@ -923,15 +904,13 @@ void cmd_red(const char *img, const char *path, uint32_t sub)
 }
 void du_walk(FILE *fp, uint32_t ino_idx, const char *path)
 {
-    /* print cumulative size of this object -------------------------------- */
     uint64_t bytes = compute_usage(fp, ino_idx);
     printf("%llu\t%s\n", (unsigned long long)bytes, path);
 
-    /* if it is a directory, recurse over its children --------------------- */
     Inode ino;
     read_inode(fp, ino_idx, &ino);
     if (!ino.isDirectory)
-        return;                         /* regular file – nothing more to do */
+        return;
 
     DirectoryEntry ent[DIRS_PER_BLOCK];
     read_block(fp, ino.directPointers[0], ent);
@@ -942,7 +921,7 @@ void du_walk(FILE *fp, uint32_t ino_idx, const char *path)
             strcmp(ent[i].name, "..") != 0)
         {
             char child_path[1024];
-            if (strcmp(path, "/") == 0)           /* avoid “//subdir” */
+            if (strcmp(path, "/") == 0)
                 snprintf(child_path, sizeof(child_path), "/%s", ent[i].name);
             else
                 snprintf(child_path, sizeof(child_path), "%s/%s",
@@ -957,14 +936,13 @@ void cmd_du(const char *img, const char *path)
     FILE *fp = open_image_rw(img);
     load_super(fp);
 
-    /* resolve the starting inode ------------------------------------------ */
     uint32_t parent_idx;
     char     leaf[MAX_FILENAME];
     uint32_t ino_idx = path_lookup(fp, path, &parent_idx, leaf);
     if (ino_idx == parent_idx)
         die("du: path not found");
 
-    du_walk(fp, ino_idx, path);         /* depth-first walk + print */
+    du_walk(fp, ino_idx, path);
 
     fclose(fp);
 }
