@@ -512,7 +512,7 @@ void cmd_ecpf(const char *img, const char *vfs_path, const char *host_path)
 
     uint32_t parent_idx;
     uint32_t ino_idx = path_lookup(fp, vfs_path, &parent_idx, NULL);
-    if (ino_idx == parent_idx)
+    if (ino_idx == parent_idx || ino_idx == UINT32_MAX)
         die("ecpf: source not found");
 
     Inode ino;
@@ -689,7 +689,7 @@ void cmd_crhl(const char *img, const char *src, const char *dst)
 
     uint32_t src_parent;
     uint32_t src_ino = path_lookup(fp, src, &src_parent, NULL);
-    if (src_ino == src_parent)
+    if (src_ino == src_parent || src_ino == UINT32_MAX)
         die("crhl: source not found");
 
     uint32_t dst_parent;
